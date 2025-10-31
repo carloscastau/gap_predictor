@@ -1,0 +1,49 @@
+Bootstrap: docker
+From: python:3.10-slim
+
+%environment
+    # Evitar prompts interactivos durante instalación
+    export DEBIAN_FRONTEND=noninteractive
+    export PYTHONUNBUFFERED=1
+    export OMP_NUM_THREADS=8
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export PYSCF_MAX_MEMORY=8000
+
+%post
+    # Instalar dependencias del sistema para PySCF y bibliotecas científicas
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential gfortran cmake \
+        libopenblas-dev liblapack-dev libfftw3-dev libhdf5-dev \
+        libxc-dev \
+        git \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Instalar dependencias Python
+    python -m pip install --upgrade pip wheel setuptools \
+        && pip install --no-cache-dir -r requirements.txt \
+        && pip install --no-cache-dir --upgrade numpy scipy matplotlib pandas pymatgen spglib
+
+    # Crear usuario no-root para seguridad (opcional en Singularity, pero recomendado)
+    useradd -m -s /bin/bash appuser \
+        && chown -R appuser:appuser /app
+
+%files
+    requirements.txt /app/requirements.txt
+    preconvergencia_GaAs.py /app/preconvergencia_GaAs.py
+    optimization_guide.md /app/optimization_guide.md
+    diagnostics.py /app/diagnostics.py
+    advanced_optimization.py /app/advanced_optimization.py
+    optimization_config.json /app/optimization_config.json
+    test_docker.py /app/test_docker.py
+    resume_checkpoint.py /app/resume_checkpoint.py
+    incremental_pipeline.py /app/incremental_pipeline.py
+
+%runscript
+    cd /app
+    exec python preconvergencia_GaAs.py "$@"
+
+%labels
+    Author sorlac
+    Version v1.0
+    Description Contenedor para cálculos DFT de preconvergencia GaAs optimizado para HPC

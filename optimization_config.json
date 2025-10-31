@@ -1,0 +1,63 @@
+{
+  "description": "Configuración avanzada para optimización global de geometrías en GaAs",
+  "version": "1.0",
+
+  "structural_parameters": {
+    "a0": 5.653,
+    "x_ga": 0.25,
+    "da": 0.03,
+    "npoints_side": 5
+  },
+
+  "dft_settings": {
+    "basis": "gth-tzv2p",
+    "pseudo": "gth-pbe",
+    "xc": "PBE",
+    "sigma_ha": 0.01,
+    "cutoff_list": [100, 150, 200],
+    "kmesh": [8, 8, 8]
+  },
+
+  "optimization_strategy": {
+    "n_random_restarts": 5,
+    "max_refine_iterations": 3,
+    "enable_adaptive_sampling": true,
+    "convergence_threshold": 1e-5,
+    "min_separation": 0.02,
+    "timeout_s": 900
+  },
+
+  "output_settings": {
+    "output_dir": "advanced_optimization_results",
+    "save_intermediate_results": true,
+    "generate_plots": true,
+    "create_summary_report": true
+  },
+
+  "convergence_criteria": {
+    "energy_threshold_meV": 1.0,
+    "parameter_threshold_A": 0.001,
+    "max_iterations": 20,
+    "patience": 3
+  },
+
+  "validation_ranges": {
+    "a_min": 5.5,
+    "a_max": 5.8,
+    "x_ga_min": 0.2,
+    "x_ga_max": 0.3,
+    "min_Ga_As_distance": 1.0,
+    "expected_gap_range_eV": [1.0, 2.0]
+  },
+
+  "comments": [
+    "Esta configuración implementa técnicas avanzadas de optimización global:",
+    "- Multi-start con puntos aleatorios para evitar mínimos locales",
+    "- Refinamiento adaptativo alrededor de candidatos prometedores",
+    "- Detección automática de cambios de pendiente",
+    "- Análisis estadístico completo de la superficie de energía",
+    "",
+    "Para ejecutar: python advanced_optimization.py --config_file optimization_config.json",
+    "Para desarrollo rápido: python advanced_optimization.py --fast"
+  ]
+}

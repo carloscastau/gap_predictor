@@ -1,0 +1,7 @@
+numpy<2.0,>=1.24
+scipy<1.14,>=1.13
+pandas<2.2,>=1.5
+matplotlib<3.9,>=3.7
+pyscf==2.3.0
+pymatgen>=2024.9.3    # ← Updated to version without scipy<1.12 constraint
+spglib>=2.0.2
