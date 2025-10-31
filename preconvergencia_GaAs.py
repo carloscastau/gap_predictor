@@ -1202,7 +1202,11 @@ def main():
     parser.add_argument("--resume", type=str, default="off",
                         help="on/off reanudar desde checkpoint previo.")
     parser.add_argument("--checkpoint_interval", type=int, default=300,
-                        help="Intervalo de guardado de checkpoints (segundos).")
+                       help="Intervalo de guardado de checkpoints (segundos).")
+    parser.add_argument("--max_cpus", action="store_true",
+                       help="Utilizar todos los CPUs disponibles del sistema.")
+    parser.add_argument("--max_memory", action="store_true",
+                       help="Utilizar toda la memoria RAM disponible del sistema.")
 
     args = parser.parse_args()
     np.random.seed(args.seed)
@@ -1258,6 +1262,26 @@ def main():
             log.info("💡 Puedes usar --resume para continuar desde este punto")
     else:
         log.info("📁 No se encontraron checkpoints previos")
+
+    # Configuración automática de recursos del sistema
+    if args.max_cpus:
+        import multiprocessing
+        available_cpus = multiprocessing.cpu_count()
+        args.nprocs = available_cpus
+        log.info(f"[MAX_CPUS] Utilizando todos los CPUs disponibles: {available_cpus}")
+
+    if args.max_memory:
+        # Detectar memoria RAM disponible
+        try:
+            import psutil
+            available_memory_gb = psutil.virtual_memory().available / (1024**3)
+            # Reservar memoria para PySCF (aprox 80% de disponible, dejando margen para sistema)
+            pyscf_memory_mb = int(available_memory_gb * 0.8 * 1024)
+            os.environ["PYSCF_MAX_MEMORY"] = str(pyscf_memory_mb)
+            log.info(f"[MAX_MEMORY] Configurada memoria PySCF: {pyscf_memory_mb} MB ({available_memory_gb:.1f} GB disponibles)")
+        except ImportError:
+            log.warning("[MAX_MEMORY] psutil no disponible, usando configuración por defecto")
+            os.environ.setdefault("PYSCF_MAX_MEMORY", "8192")  # 8 GB por defecto
 
     nprocs = max(1, int(args.nprocs))
     # Configuración inteligente de paralelización para HPC

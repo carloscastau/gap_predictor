@@ -31,7 +31,7 @@ COPY resume_checkpoint.py .
 # Instalar dependencias Python
 RUN python -m pip install --upgrade pip wheel setuptools \
     && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --upgrade numpy scipy matplotlib pandas pymatgen spglib
+    && pip install --no-cache-dir --upgrade numpy scipy matplotlib pandas pymatgen spglib psutil
 
 # Crear usuario no-root para seguridad
 RUN useradd -m -s /bin/bash appuser \
