@@ -94,13 +94,19 @@ def ensure_dirs(out_root: Path) -> Dict[str, Path]:
 def save_checkpoint(out_root: Path, stage: str, data: Dict[str, Any], log: logging.Logger = None):
     """Guarda un checkpoint del progreso actual."""
     checkpoint_dir = out_root / "checkpoints"
-    checkpoint_file = checkpoint_dir / f"checkpoint_{stage}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)  # Asegurar que el directorio existe
+
+    # Crear nombre único con timestamp para evitar sobrescrituras
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    checkpoint_file = checkpoint_dir / f"checkpoint_{stage}_{timestamp}.json"
 
     checkpoint_data = {
         "stage": stage,
         "timestamp": datetime.now().isoformat(),
         "data": data,
-        "status": "in_progress"
+        "status": "in_progress",
+        "version": "2.0",  # Versión para compatibilidad futura
+        "hostname": os.uname().nodename if hasattr(os, 'uname') else 'unknown'
     }
 
     try:
@@ -117,14 +123,21 @@ def save_checkpoint(out_root: Path, stage: str, data: Dict[str, Any], log: loggi
 def save_incremental_checkpoint(out_root: Path, stage: str, data: Dict[str, Any], log: logging.Logger = None):
     """Guarda checkpoint incremental durante cálculos largos."""
     checkpoint_dir = out_root / "checkpoints"
-    checkpoint_file = checkpoint_dir / f"checkpoint_{stage}_incremental_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)  # Asegurar que el directorio existe
+
+    # Nombre único con microsegundos para evitar colisiones
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    checkpoint_file = checkpoint_dir / f"checkpoint_{stage}_incremental_{timestamp}.json"
 
     checkpoint_data = {
         "stage": stage,
         "timestamp": datetime.now().isoformat(),
         "data": data,
         "status": "incremental",
-        "type": "incremental"
+        "type": "incremental",
+        "version": "2.0",
+        "hostname": os.uname().nodename if hasattr(os, 'uname') else 'unknown',
+        "calculation_state": data.get("calculation_state", "unknown")  # Estado específico del cálculo
     }
 
     try:
@@ -152,13 +165,28 @@ def load_latest_checkpoint(out_root: Path, stage: str = None) -> Dict[str, Any]:
     if not checkpoint_files:
         return {}
 
-    # Encontrar el más reciente
-    latest_file = max(checkpoint_files, key=lambda x: x.stat().st_mtime)
+    # Encontrar el más reciente por timestamp, no por mtime del archivo
+    # Esto es más confiable para checkpoints distribuidos
+    def get_checkpoint_time(cp_file):
+        try:
+            with open(cp_file, 'r') as f:
+                data = json.load(f)
+                return data.get('timestamp', '1970-01-01T00:00:00')
+        except Exception:
+            return '1970-01-01T00:00:00'
+
+    latest_file = max(checkpoint_files, key=get_checkpoint_time)
 
     try:
         with open(latest_file, 'r') as f:
-            return json.load(f)
-    except Exception:
+            checkpoint_data = json.load(f)
+            # Validar versión del checkpoint
+            version = checkpoint_data.get('version', '1.0')
+            if version != '2.0':
+                print(f"Advertencia: Checkpoint versión {version}, actual 2.0")
+            return checkpoint_data
+    except Exception as e:
+        print(f"Error cargando checkpoint {latest_file}: {e}")
         return {}
 
 def parse_k_list(s: str) -> List[Tuple[int,int,int]]:
@@ -447,6 +475,8 @@ def scan_cutoff(a_A: float, x_ga: float, basis: str, pseudo: str,
             "gpu": gpu,
             "timeout_s": timeout_s,
             "policy": policy,
+            "calculation_state": "cutoff_scan",
+            "progress": f"cutoff_{data.get('cutoff_Ry', 'unknown')}",
             **data
         }
         save_incremental_checkpoint(out_dir.parent, stage, incremental_data, log)
@@ -524,6 +554,8 @@ def scan_kmesh(a_A: float, x_ga: float, basis: str, pseudo: str,
             "gpu": gpu,
             "timeout_s": timeout_s,
             "policy": policy,
+            "calculation_state": "kmesh_scan",
+            "progress": f"kmesh_{data.get('kmesh', 'unknown')}",
             **data
         }
         save_incremental_checkpoint(out_dir.parent, stage, incremental_data, log)
@@ -648,6 +680,8 @@ def advanced_lattice_optimization(a0: float, da: float, npoints_side: int,
             "gpu": gpu,
             "timeout_s": timeout_s,
             "policy": policy,
+            "calculation_state": "lattice_optimization",
+            "progress": f"lattice_{data.get('a_Ang', 'unknown'):.4f}",
             **data
         }
         save_incremental_checkpoint(out_dir.parent, stage, incremental_data, log)
@@ -1195,8 +1229,7 @@ def main():
         from reproducibility_validator import ReproducibilityValidator
         validator = ReproducibilityValidator(out_root)
         env_fingerprint = validator.get_environment_fingerprint()
-        print("
-=== HUELLA DIGITAL DEL ENTORNO ===")
+        print("\n=== HUELLA DIGITAL DEL ENTORNO ===")
         print(f"Fingerprint: {env_fingerprint['fingerprint']}")
         print(f"Python: {env_fingerprint['python_version'][:50]}...")
         print(f"PySCF: {env_fingerprint['pyscf_version']}")
@@ -1217,7 +1250,12 @@ def main():
 
     if resume_from_stage:
         log.info(f"📁 Checkpoint encontrado: {resume_from_stage}")
-        log.info("💡 Puedes usar --resume para continuar desde este punto")
+        log.info(f"   Estado: {checkpoint.get('status', 'unknown')}")
+        log.info(f"   Timestamp: {checkpoint.get('timestamp', 'unknown')}")
+        if enable_resume:
+            log.info("💡 Modo resume activado - continuando desde checkpoint")
+        else:
+            log.info("💡 Puedes usar --resume para continuar desde este punto")
     else:
         log.info("📁 No se encontraron checkpoints previos")
 
@@ -1251,6 +1289,40 @@ def main():
             k_list = [(2,2,2),(4,4,4),(6,6,6),(8,8,8),(12,12,12)]
         args.npoints_side = max(3, min(args.npoints_side, 4))
 
+    # Lógica de reanudación mejorada
+    resume_stage = None
+    resume_data = None
+    if enable_resume and checkpoint:
+        resume_stage = checkpoint.get("stage")
+        resume_data = checkpoint.get("data", {})
+        log.info(f"[RESUME] Reanudando desde etapa: {resume_stage}")
+
+        # Determinar qué etapas saltar basado en el checkpoint
+        stages_completed = []
+        if resume_stage in ["post_cutoff", "pre_kmesh", "post_kmesh", "pre_lattice", "post_lattice", "pre_bands", "post_bands", "pre_slab", "post_slab", "completed"]:
+            stages_completed.append("cutoff")
+        if resume_stage in ["post_kmesh", "pre_lattice", "post_lattice", "pre_bands", "post_bands", "pre_slab", "post_slab", "completed"]:
+            stages_completed.append("kmesh")
+        if resume_stage in ["post_lattice", "pre_bands", "post_bands", "pre_slab", "post_slab", "completed"]:
+            stages_completed.append("lattice")
+        if resume_stage in ["post_bands", "pre_slab", "post_slab", "completed"]:
+            stages_completed.append("bands")
+        if resume_stage in ["post_slab", "completed"]:
+            stages_completed.append("slab")
+
+        log.info(f"[RESUME] Etapas completadas: {stages_completed}")
+
+        # Restaurar parámetros desde checkpoint si están disponibles
+        if "cutoff_star" in resume_data:
+            cutoff_star = resume_data["cutoff_star"]
+            log.info(f"[RESUME] Cutoff restaurado: {cutoff_star} Ry")
+        if "kmesh_star" in resume_data:
+            kmesh_star = tuple(resume_data["kmesh_star"])
+            log.info(f"[RESUME] K-mesh restaurado: {fmt_tuple(kmesh_star)}")
+        if "a_opt" in resume_data:
+            a_opt = resume_data["a_opt"]
+            log.info(f"[RESUME] a_opt restaurado: {a_opt:.4f} Å")
+
     if basis_sweep:
         cand = UNIVERSAL_GTH_BASES
         if args.basis_list:
@@ -1272,68 +1344,91 @@ def main():
     for basis in bases:
         log.info(f"================ Base: {basis} ================")
 
-        # Guardar checkpoint antes de cutoff
-        save_checkpoint(out_root, "pre_cutoff", {"basis": basis, "cutoff_list": cutoff_list}, log)
+        # Verificar si podemos saltar cutoff basado en resume
+        skip_cutoff = enable_resume and "cutoff" in stages_completed
+        if skip_cutoff:
+            cutoff_star = resume_data.get("cutoff_star", cutoff_list[-1])
+            log.info(f"[RESUME] Saltando cutoff, usando valor guardado: {cutoff_star} Ry")
+        else:
+            # Guardar checkpoint antes de cutoff
+            save_checkpoint(out_root, "pre_cutoff", {"basis": basis, "cutoff_list": cutoff_list}, log)
 
-        # 1) cutoff
-        df_cutoff = scan_cutoff(a_A=args.a0, x_ga=args.x_ga, basis=basis, pseudo=args.pseudo,
-                                sigma_ha=args.sigma_ha, xc=args.xc,
-                                cutoff_list_Ry=cutoff_list, kmesh_fixed=(6,6,6),
-                                out_dir=subdirs["cutoff"], log=log,
-                                nprocs=nprocs, gpu=use_gpu, timeout_s=timeout_s, policy=policy)
-        cutoff_star = choose_cutoff(df_cutoff, thr_Ha=1e-4) if df_cutoff is not None else cutoff_list[-1]
-        if cutoff_star is None:
-            cutoff_star = 100.0  # Valor por defecto si no se puede determinar
-            log.warning(f"[cutoff*] No se pudo determinar cutoff óptimo, usando {cutoff_star} Ry por defecto")
-        log.info(f"[cutoff*] {cutoff_star} Ry")
+            # 1) cutoff
+            df_cutoff = scan_cutoff(a_A=args.a0, x_ga=args.x_ga, basis=basis, pseudo=args.pseudo,
+                                    sigma_ha=args.sigma_ha, xc=args.xc,
+                                    cutoff_list_Ry=cutoff_list, kmesh_fixed=(6,6,6),
+                                    out_dir=subdirs["cutoff"], log=log,
+                                    nprocs=nprocs, gpu=use_gpu, timeout_s=timeout_s, policy=policy)
+            cutoff_star = choose_cutoff(df_cutoff, thr_Ha=1e-4) if df_cutoff is not None else cutoff_list[-1]
+            if cutoff_star is None:
+                cutoff_star = 100.0  # Valor por defecto si no se puede determinar
+                log.warning(f"[cutoff*] No se pudo determinar cutoff óptimo, usando {cutoff_star} Ry por defecto")
+            log.info(f"[cutoff*] {cutoff_star} Ry")
 
-        # Guardar checkpoint después de cutoff
-        save_checkpoint(out_root, "post_cutoff", {"basis": basis, "cutoff_star": cutoff_star}, log)
+            # Guardar checkpoint después de cutoff
+            save_checkpoint(out_root, "post_cutoff", {"basis": basis, "cutoff_star": cutoff_star}, log)
 
         # 2) k-mesh
-        save_checkpoint(out_root, "pre_kmesh", {"basis": basis, "cutoff_star": cutoff_star}, log)
-        df_k = scan_kmesh(a_A=args.a0, x_ga=args.x_ga, basis=basis, pseudo=args.pseudo,
-                          sigma_ha=args.sigma_ha, xc=args.xc,
-                          ke_cutoff_Ry=cutoff_star, k_list=k_list,
-                          out_dir=subdirs["kmesh"], log=log,
-                          nprocs=1, gpu=use_gpu, timeout_s=timeout_s, policy=policy)
-        kmesh_star = choose_kmesh(df_k, thr_Ha=1e-5) if df_k is not None else k_list[-1]
-        if kmesh_star is None:
-            kmesh_star = (6, 6, 6)  # Valor por defecto
-            log.warning(f"[k*] No se pudo determinar kmesh óptimo, usando {fmt_tuple(kmesh_star)} por defecto")
-        log.info(f"[k*] {fmt_tuple(kmesh_star)}")
+        skip_kmesh = enable_resume and "kmesh" in stages_completed
+        if skip_kmesh:
+            kmesh_star = tuple(resume_data.get("kmesh_star", k_list[-1]))
+            log.info(f"[RESUME] Saltando k-mesh, usando valor guardado: {fmt_tuple(kmesh_star)}")
+        else:
+            save_checkpoint(out_root, "pre_kmesh", {"basis": basis, "cutoff_star": cutoff_star}, log)
+            df_k = scan_kmesh(a_A=args.a0, x_ga=args.x_ga, basis=basis, pseudo=args.pseudo,
+                              sigma_ha=args.sigma_ha, xc=args.xc,
+                              ke_cutoff_Ry=cutoff_star, k_list=k_list,
+                              out_dir=subdirs["kmesh"], log=log,
+                              nprocs=1, gpu=use_gpu, timeout_s=timeout_s, policy=policy)
+            kmesh_star = choose_kmesh(df_k, thr_Ha=1e-5) if df_k is not None else k_list[-1]
+            if kmesh_star is None:
+                kmesh_star = (6, 6, 6)  # Valor por defecto
+                log.warning(f"[k*] No se pudo determinar kmesh óptimo, usando {fmt_tuple(kmesh_star)} por defecto")
+            log.info(f"[k*] {fmt_tuple(kmesh_star)}")
 
-        save_checkpoint(out_root, "post_kmesh", {"basis": basis, "kmesh_star": kmesh_star}, log)
+            save_checkpoint(out_root, "post_kmesh", {"basis": basis, "kmesh_star": kmesh_star}, log)
 
         # 3) E(a) + ajuste avanzado
-        save_checkpoint(out_root, "pre_lattice", {"basis": basis, "cutoff_star": cutoff_star, "kmesh_star": kmesh_star}, log)
-        df_lat, fit = advanced_lattice_optimization(a0=args.a0, da=args.da, npoints_side=args.npoints_side,
-                                                    x_ga=args.x_ga, basis=basis, pseudo=args.pseudo,
-                                                    sigma_ha=args.sigma_ha, xc=args.xc,
-                                                    ke_cutoff_Ry=cutoff_star, kmesh=kmesh_star,
-                                                    out_dir=subdirs["lattice"], log=log,
-                                                    nprocs=nprocs, gpu=use_gpu, timeout_s=timeout_s, policy=policy,
-                                                    n_random_restarts=3, enable_multi_start=True)
-        a_opt = float(fit["a_opt"]) if fit else args.a0
-        E_min = float(fit["E_min"]) if fit else np.nan
-        log.info(f"[a*] a_opt ≈ {a_opt:.6f} Å (R²={fit['R2']:.6f if fit else np.nan})")
+        skip_lattice = enable_resume and "lattice" in stages_completed
+        if skip_lattice:
+            a_opt = resume_data.get("a_opt", args.a0)
+            fit = resume_data.get("fit_info", None)
+            E_min = fit.get("E_min", np.nan) if fit else np.nan
+            log.info(f"[RESUME] Saltando lattice optimization, usando valores guardados: a_opt={a_opt:.4f} Å")
+        else:
+            save_checkpoint(out_root, "pre_lattice", {"basis": basis, "cutoff_star": cutoff_star, "kmesh_star": kmesh_star}, log)
+            df_lat, fit = advanced_lattice_optimization(a0=args.a0, da=args.da, npoints_side=args.npoints_side,
+                                                        x_ga=args.x_ga, basis=basis, pseudo=args.pseudo,
+                                                        sigma_ha=args.sigma_ha, xc=args.xc,
+                                                        ke_cutoff_Ry=cutoff_star, kmesh=kmesh_star,
+                                                        out_dir=subdirs["lattice"], log=log,
+                                                        nprocs=nprocs, gpu=use_gpu, timeout_s=timeout_s, policy=policy,
+                                                        n_random_restarts=3, enable_multi_start=True)
+            a_opt = float(fit["a_opt"]) if fit else args.a0
+            E_min = float(fit["E_min"]) if fit else np.nan
+            log.info(f"[a*] a_opt ≈ {a_opt:.6f} Å (R²={fit['R2']:.6f if fit else np.nan})")
 
-        save_checkpoint(out_root, "post_lattice", {"basis": basis, "a_opt": a_opt, "fit_info": fit}, log)
+            save_checkpoint(out_root, "post_lattice", {"basis": basis, "a_opt": a_opt, "fit_info": fit}, log)
 
         # 4) Bandas (+DOS opcional)
-        save_checkpoint(out_root, "pre_bands", {"basis": basis, "a_opt": a_opt}, log)
-        cell_final = build_gaas_cell(a_opt, args.x_ga, basis, args.pseudo, cutoff_star)
-        kmf_final, ok = run_scf(cell_final, kmesh_star, args.xc, args.sigma_ha, log, gpu=use_gpu)
-        if not ok: log.warning("[final] SCF no convergió; resultados pueden contener NaN.")
-        gap_info = extract_gap_from_kmf(kmf_final)
-        gap_info["basis"] = basis; gap_info["a_opt_Ang"] = a_opt; gap_info["E_min_Ha"] = E_min
-        struct = build_pmg_structure(a_opt, args.x_ga)
-        _ = compute_bands_and_write(cell_final, kmf_final, struct, args.sigma_ha, basis,
-                                    cutoff_star, kmesh_star, subdirs["bands"], log, line_density=50)
-        if do_dos:
-            compute_dos(kmf_final, subdirs["dos"], sigma_ev=0.15, log=log)
+        skip_bands = enable_resume and "bands" in stages_completed
+        if skip_bands:
+            gap_info = resume_data.get("gap_info", {})
+            log.info(f"[RESUME] Saltando cálculo de bandas, usando gap guardado: {gap_info.get('gap_eV', 'unknown')} eV")
+        else:
+            save_checkpoint(out_root, "pre_bands", {"basis": basis, "a_opt": a_opt}, log)
+            cell_final = build_gaas_cell(a_opt, args.x_ga, basis, args.pseudo, cutoff_star)
+            kmf_final, ok = run_scf(cell_final, kmesh_star, args.xc, args.sigma_ha, log, gpu=use_gpu)
+            if not ok: log.warning("[final] SCF no convergió; resultados pueden contener NaN.")
+            gap_info = extract_gap_from_kmf(kmf_final)
+            gap_info["basis"] = basis; gap_info["a_opt_Ang"] = a_opt; gap_info["E_min_Ha"] = E_min
+            struct = build_pmg_structure(a_opt, args.x_ga)
+            _ = compute_bands_and_write(cell_final, kmf_final, struct, args.sigma_ha, basis,
+                                        cutoff_star, kmesh_star, subdirs["bands"], log, line_density=50)
+            if do_dos:
+                compute_dos(kmf_final, subdirs["dos"], sigma_ev=0.15, log=log)
 
-        save_checkpoint(out_root, "post_bands", {"basis": basis, "gap_info": gap_info}, log)
+            save_checkpoint(out_root, "post_bands", {"basis": basis, "gap_info": gap_info}, log)
 
         gap_summary_rows.append(dict(
             basis=basis, a_opt_Ang=a_opt, E_min_Ha=E_min,
@@ -1344,7 +1439,8 @@ def main():
         pd.DataFrame(gap_summary_rows).to_csv(subdirs["bands"] / "gap_summary.csv", index=False)
 
         # 5) Slab (opcional)
-        if do_slab:
+        skip_slab = enable_resume and "slab" in stages_completed
+        if do_slab and not skip_slab:
             save_checkpoint(out_root, "pre_slab", {"basis": basis, "a_opt": a_opt}, log)
             slab_res = slab_pipeline(a_opt, args.x_ga, args.slab_miller, args.vacuum_A,
                                      basis, args.pseudo, args.sigma_ha, args.xc,
@@ -1360,6 +1456,8 @@ def main():
             )]).to_csv(subdirs["slab"] / "anderson_alignment.csv", index=False)
 
             save_checkpoint(out_root, "post_slab", {"basis": basis, "slab_results": slab_res}, log)
+        elif do_slab and skip_slab:
+            log.info("[RESUME] Saltando cálculo de slab")
 
     # Guardar checkpoint final
     save_checkpoint(out_root, "completed", {"status": "completed", "bases_processed": bases}, log)

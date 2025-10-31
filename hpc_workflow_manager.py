@@ -58,7 +58,7 @@ class HPCWorkflowManager:
         submitted_jobs = []
         previous_job_id = None
 
-        for script_path in workflow.job_scripts:
+        for i, script_path in enumerate(workflow.job_scripts):
             script_full_path = self.workspace_dir / script_path
 
             if not script_full_path.exists():
@@ -69,8 +69,9 @@ class HPCWorkflowManager:
             cmd = ["sbatch"]
 
             # Agregar dependencias
-            if previous_job_id and workflow.dependencies:
-                cmd.extend(["--dependency", f"afterok:{previous_job_id}"])
+            if previous_job_id and workflow.dependencies and i < len(workflow.dependencies):
+                dependency_type = workflow.dependencies[i]
+                cmd.extend(["--dependency", f"{dependency_type}:{previous_job_id}"])
 
             # Configuración adicional
             if workflow.max_runtime_hours:
@@ -114,6 +115,23 @@ class HPCWorkflowManager:
         for workflow_name, workflow_data in self.active_jobs.items():
             if workflow_data["status"] == "running":
                 self._check_workflow_status(workflow_name)
+
+    def auto_recover_failed_jobs(self):
+        """Recupera automáticamente trabajos fallidos."""
+        for workflow_name, workflow_data in self.active_jobs.items():
+            if workflow_data["status"] == "running":
+                failed_jobs = []
+                for job_info in workflow_data["jobs"]:
+                    if job_info.get("current_status") in ["FAILED", "TIMEOUT", "CANCELLED"]:
+                        failed_jobs.append(job_info)
+
+                if failed_jobs:
+                    print(f"🔄 Recuperando workflow fallido: {workflow_name}")
+                    # Intentar reenviar jobs fallidos
+                    recovery_workflow = self.workflows.get("gaas_recovery_pipeline")
+                    if recovery_workflow:
+                        self.submit_workflow("gaas_recovery_pipeline")
+                        print(f"✅ Workflow de recuperación enviado para: {workflow_name}")
 
     def _check_workflow_status(self, workflow_name: str):
         """Verifica el estado de un workflow."""
@@ -265,6 +283,26 @@ def create_predefined_workflows() -> List[HPCWorkflow]:
     )
     workflows.append(full_workflow)
 
+    # Workflow incremental optimizado
+    incremental_workflow = HPCWorkflow(
+        name="gaas_incremental_optimized",
+        description="Pipeline incremental con reutilización de datos y checkpoints recurrentes",
+        job_scripts=["slurm_incremental.sh"],
+        max_runtime_hours=48,
+        priority="high"
+    )
+    workflows.append(incremental_workflow)
+
+    # Workflow de recuperación de fallos
+    recovery_workflow = HPCWorkflow(
+        name="gaas_recovery_pipeline",
+        description="Recuperación de cálculos interrumpidos con checkpoints",
+        job_scripts=["slurm_recovery.sh"],
+        max_runtime_hours=24,
+        priority="normal"
+    )
+    workflows.append(recovery_workflow)
+
     return workflows
 
 
@@ -273,11 +311,13 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Gestor de flujos de trabajo HPC para DFT")
-    parser.add_argument("action", choices=["submit", "monitor", "status", "list", "cancel"],
+    parser.add_argument("action", choices=["submit", "monitor", "status", "list", "cancel", "recover"],
                        help="Acción a realizar")
     parser.add_argument("--workflow", help="Nombre del workflow")
     parser.add_argument("--workspace", type=Path, default=Path("."),
                        help="Directorio de trabajo")
+    parser.add_argument("--auto-recover", action="store_true",
+                       help="Habilitar recuperación automática de fallos")
 
     args = parser.parse_args()
 
@@ -325,6 +365,11 @@ def main():
 
         if manager.cancel_workflow(args.workflow):
             print(f"🛑 Workflow cancelado: {args.workflow}")
+
+    elif args.action == "recover":
+        print("🔄 Iniciando recuperación automática de workflows fallidos...")
+        manager.auto_recover_failed_jobs()
+        print("✅ Recuperación completada")
 
 
 if __name__ == "__main__":
