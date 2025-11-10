@@ -1,0 +1,36 @@
+# config/default.yaml
+# Configuración por defecto para preconvergencia GaAs
+
+# Parámetros físicos
+lattice_constant: 5.653
+x_ga: 0.25
+sigma_ha: 0.01
+
+# Parámetros computacionales
+basis_set: "gth-dzvp"
+pseudopotential: "gth-pbe"
+xc_functional: "PBE"
+
+# Parámetros de convergencia
+cutoff_list: [80, 120, 160]
+kmesh_list: [[2, 2, 2], [4, 4, 4], [6, 6, 6]]
+
+# Configuración de paralelismo
+max_workers: 2
+timeout_seconds: 300
+memory_limit_gb: 8.0
+
+# Configuración de salida
+output_dir: "results"
+checkpoint_interval: 60
+
+# Configuración de stages
+stage_timeout: 600
+
+# Configuración de logging
+log_level: "INFO"
+log_file: "preconv.log"
+
+# Configuración de GPU (opcional)
+use_gpu: false
+gpu_memory_limit: 4.0

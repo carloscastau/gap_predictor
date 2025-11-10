@@ -1,242 +1,273 @@
-# Preconvergencia DFT/PBC - GaAs
+# Preconvergencia DFT/PBC para GaAs - Versión Refactorizada
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PySCF](https://img.shields.io/badge/PySCF-2.3.0-green.svg)](https://pyscf.org/)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
-[![HPC Ready](https://img.shields.io/badge/HPC-ready-orange.svg)](https://slurm.schedmd.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Sistema automatizado para la preconvergencia de parámetros en cálculos DFT/PBC (Density Functional Theory / Periodic Boundary Conditions) para el material GaAs (Arsénuro de Galio).
+Pipeline modular y escalable para preconvergencia DFT/PBC optimizado para GaAs, con soporte completo para ejecución en entornos locales, Docker y supercomputadoras.
 
-## 🎯 Objetivo
+## 🚀 Características Principales
 
-Este proyecto implementa un pipeline completo de preconvergencia DFT para determinar los parámetros óptimos de cálculo (cutoff del plano de ondas, malla k-points, parámetro de red) que garanticen convergencia numérica mientras minimizan el costo computacional.
+- **Arquitectura Modular**: Código organizado en módulos independientes con responsabilidades claras
+- **Configuración Flexible**: Soporte para múltiples entornos (local, Docker, HPC)
+- **Paralelización Inteligente**: Optimización automática de recursos computacionales
+- **Sistema de Stages**: Pipeline con stages modulares e independientes
+- **Checkpoints Automáticos**: Recuperación automática de fallos y reanudación
+- **Logging Estructurado**: Monitoreo completo del rendimiento y diagnóstico
+- **Tests Completos**: Cobertura unitaria e integración
 
-## 📊 Características Principales
+## 📋 Requisitos
 
-### ✅ Pipeline de Preconvergencia
-- **Etapa 1**: Convergencia vs Cutoff del plano de ondas
-- **Etapa 2**: Convergencia vs malla k-points
-- **Etapa 3**: Optimización del parámetro de red (E vs a)
-- **Etapa 4**: Cálculo de bandas electrónicas y DOS
+- Python 3.9+
+- PySCF 2.3.0
+- NumPy, SciPy, Pandas, Matplotlib
+- PyMatGen, SPGLIB
 
-### 🚀 Optimizaciones Implementadas
-- **Paralelización inteligente**: OMP_NUM_THREADS optimizado
-- **Early stopping**: Criterios de convergencia adaptativos
-- **Checkpointing incremental**: Recuperación de fallos
-- **Timeout seguro**: Prevención de cálculos infinitos
-- **Smearing Fermi-Dirac**: Mejor convergencia SCF
+## 🛠️ Instalación
 
-### 📈 Visualización y Análisis
-- **Reportes HTML interactivos**: Resultados completos
-- **Gráficas de convergencia**: Energía vs parámetros
-- **Análisis de eficiencia**: Métricas de rendimiento
-- **Optimización automática**: Recomendaciones basadas en datos
+### Opción 1: Instalación Directa
+```bash
+git clone <repository-url>
+cd preconvergencia-gaas
+pip install -r requirements.txt
+pip install -e .
+```
+
+### Opción 2: Docker
+```bash
+# Construir imagen
+docker build -t preconvergence-gaas .
+
+# Ejecutar contenedor
+docker run -v $(pwd)/results:/app/results preconvergence-gaas
+```
+
+### Opción 3: Supercomputadora (HPC)
+```bash
+# Configurar módulos específicos de tu cluster
+module load python/3.11 openmpi/4.1.4 cuda/11.8
+
+# Instalar dependencias
+pip install --user -r requirements.txt
+
+# Ejecutar con configuración HPC
+python scripts/run_preconvergence.py --config config/hpc.yaml
+```
+
+## 🎯 Uso
+
+### Ejecución Local Rápida
+```bash
+# Configuración rápida para pruebas
+python scripts/run_preconvergence.py --fast
+```
+
+### Ejecución con Configuración Personalizada
+```bash
+# Usar configuración específica
+python scripts/run_preconvergence.py --config config/production.yaml
+
+# Especificar directorio de salida
+python scripts/run_preconvergence.py --output_dir my_results
+```
+
+### Reanudar desde Checkpoint
+```bash
+# Continuar desde un checkpoint anterior
+python scripts/run_preconvergence.py --resume checkpoint_name
+```
+
+### Docker
+```bash
+# Ejecutar en contenedor con configuración optimizada
+docker run -v $(pwd)/results:/app/results preconvergence-gaas \
+    --config config/docker.yaml
+```
+
+### Supercomputadora (SLURM)
+```bash
+# Enviar job a cola SLURM
+sbatch scripts/run_hpc_job.sh
+
+# O ejecutar directamente
+srun python scripts/run_preconvergence.py --config config/hpc.yaml
+```
+
+## ⚙️ Configuración
+
+### Archivos de Configuración Disponibles
+
+- **`config/default.yaml`**: Configuración estándar
+- **`config/docker.yaml`**: Optimizada para contenedores Docker
+- **`config/hpc.yaml`**: Optimizada para supercomputadoras
+- **`config/fast.yaml`**: Configuración rápida para pruebas
+
+### Parámetros Principales
+
+```yaml
+# Parámetros físicos
+lattice_constant: 5.653  # Parámetro de red (Å)
+x_ga: 0.25              # Posición Ga en (x,x,x)
+sigma_ha: 0.01          # Smearing Fermi-Dirac (Ha)
+
+# Parámetros computacionales
+basis_set: "gth-dzvp"           # Base GTH
+pseudopotential: "gth-pbe"      # Pseudopotencial
+xc_functional: "PBE"            # Funcional de intercambio-correlación
+
+# Convergencia
+cutoff_list: [80, 120, 160]     # Cutoffs de plano de ondas (Ry)
+kmesh_list: [[2,2,2], [4,4,4]]  # Mallas k-point
+
+# Paralelización
+max_workers: 4                  # Número máximo de workers
+timeout_seconds: 300            # Timeout por cálculo (s)
+memory_limit_gb: 8.0           # Límite de memoria (GB)
+```
+
+## 📊 Resultados
+
+El pipeline genera automáticamente:
+
+- **Gráficas de convergencia** para cutoff, k-mesh y parámetro de red
+- **Estructura de bandas** y densidad de estados
+- **Reportes HTML** con análisis completo
+- **Archivos CSV** con datos numéricos
+- **Logs estructurados** con métricas de rendimiento
+
+### Estructura de Salida
+```
+results/
+├── cutoff/
+│   ├── cutoff.csv
+│   └── E_vs_cutoff.png
+├── kmesh/
+│   ├── kmesh.csv
+│   └── E_vs_kmesh.png
+├── lattice/
+│   ├── lattice_optimization.csv
+│   └── advanced_optimization.png
+├── bands/
+│   ├── bands.csv
+│   ├── bands.png
+│   └── gap_summary.csv
+├── checkpoints/
+│   └── checkpoint_*.json
+├── logs/
+│   └── preconv.log
+└── visualization_report/
+    ├── convergence_overview.png
+    ├── computational_efficiency.png
+    └── preconvergence_report.html
+```
+
+## 🧪 Tests
+
+```bash
+# Ejecutar todos los tests
+pytest
+
+# Tests con cobertura
+pytest --cov=src --cov-report=html
+
+# Tests específicos
+pytest tests/unit/test_config.py
+pytest tests/integration/test_pipeline.py
+```
 
 ## 🏗️ Arquitectura
 
 ```
-preconvergencia-GaAs/
-├── 📁 preconvergencia_out/          # Resultados de cálculos
-│   ├── cutoff/                      # Datos cutoff
-│   ├── kmesh/                       # Datos k-points
-│   ├── lattice/                     # Optimización parámetro red
-│   ├── bands/                       # Bandas electrónicas
-│   ├── checkpoints/                 # Estados guardados
-│   └── visualization_report/        # Reportes visuales
-├── 📁 results/                      # Resultados finales
-├── 📄 preconvergencia_GaAs.py       # Script principal
-├── 📄 visualize_preconvergence.py   # Generador de reportes
-├── 📄 optimize_pipeline.py          # Analizador de optimización
-├── 📄 requirements.txt              # Dependencias Python
-├── 📄 Dockerfile                    # Contenedor Docker
-└── 📄 README.md                     # Esta documentación
+preconvergencia-gaas/
+├── src/
+│   ├── config/          # Configuración centralizada
+│   ├── core/            # Componentes principales (DFT, paralelización)
+│   ├── models/          # Modelos de datos
+│   ├── workflow/        # Pipeline y stages
+│   │   ├── stages/      # Stages individuales
+│   │   └── checkpoint/  # Sistema de checkpoints
+│   ├── analysis/        # Análisis estadístico
+│   ├── visualization/   # Generadores de gráficos
+│   └── utils/           # Utilidades (logging, etc.)
+├── tests/               # Tests unitarios e integración
+├── scripts/             # Scripts de ejecución
+├── config/              # Archivos de configuración YAML
+└── docs/                # Documentación
 ```
 
-## 🚀 Inicio Rápido
+## 🔧 Desarrollo
 
-### Opción 1: Docker (Recomendado)
-
-```bash
-# Construir imagen
-sudo docker build -t preconvergencia-gaas .
-
-# Ejecutar validación local optimizada
-sudo docker run --rm -v $(pwd):/data preconvergencia-gaas \
-  /bin/bash -c "export OMP_NUM_THREADS=4 && \
-                export OPENBLAS_NUM_THREADS=1 && \
-                export MKL_NUM_THREADS=1 && \
-                python preconvergencia_GaAs.py \
-                --fast --nprocs 1 --gpu off --timeout_s 60 \
-                --basis_list gth-dzvp --sigma_ha 0.01 \
-                --cutoff_list 80,120 --k_list 2x2x2,4x4x4 \
-                --a0 5.653 --da 0.05 --npoints_side 3 \
-                --dos off --make_report off"
-```
-
-### Opción 2: Instalación Local
-
-```bash
-# Instalar dependencias
-pip install -r requirements.txt
-
-# Ejecutar preconvergencia
-python preconvergencia_GaAs.py --help
-
-# Generar reportes visuales
-python visualize_preconvergence.py
-```
-
-## 📊 Resultados de Validación
-
-### ⚡ Rendimiento Optimizado
-- **Tiempo total**: ~12 horas (vs días sin optimizaciones)
-- **Cálculos completados**: 25 puntos de optimización lattice
-- **Parámetros óptimos encontrados**: a = 5.653 Å
-- **Energía mínima**: -80.031 Ha
-
-### 🎯 Convergencia Lograda
-- ✅ **Cutoff**: 100 Ry (óptimo determinado)
-- ✅ **k-mesh**: 2x2x2 (suficiente para convergencia)
-- ✅ **Lattice**: a = 5.653 Å (valor experimental)
-- ✅ **SCF**: Convergencia en todos los puntos
-
-## 🔧 Configuración Optimizada
-
-### Variables de Entorno Recomendadas
-```bash
-export OMP_NUM_THREADS=4
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export PYSCF_MAX_MEMORY=4096  # MB
-```
-
-### Parámetros de Cálculo
+### Añadir Nuevo Stage
 ```python
-# Configuración validada
-cutoff_ry = 100
-kmesh = (2, 2, 2)
-a_lattice = 5.653  # Å
-basis = "gth-dzvp"
-xc_functional = "PBE"
-sigma_smearing = 0.01  # Ha
+# src/workflow/stages/new_stage.py
+from .base import PipelineStage
+
+class NewStage(PipelineStage):
+    def get_dependencies(self) -> List[str]:
+        return ["previous_stage"]
+
+    async def execute(self, previous_results: Dict[str, StageResult]) -> StageResult:
+        # Implementación del stage
+        pass
 ```
 
-## 📈 Análisis de Optimización
-
-### Estrategias Implementadas
-1. **Optimización SCF**: DIIS space=12, level shifting adaptativo
-2. **Paralelización**: OMP_NUM_THREADS=4 para sistemas de 8 CPUs
-3. **Early Stopping**: Criterios de convergencia ΔE < 1e-4 Ha
-4. **Timeout Seguro**: 60s por punto para evitar cálculos infinitos
-
-### Speedup Logrado
-- **Estimación**: 8x más rápido que configuración base
-- **Validación**: Completado en 12 horas vs días proyectados
-- **Eficiencia**: 100% de cálculos convergieron exitosamente
-
-## 🎨 Reportes Visuales
-
-Los reportes incluyen:
-- **Gráficas de convergencia**: Energía vs cutoff, k-points, parámetro de red
-- **Análisis de residuos**: Calidad del ajuste cuadrático
-- **Eficiencia computacional**: Tiempo por etapa del pipeline
-- **Recomendaciones**: Próximos pasos para escalado HPC
-
-```bash
-# Generar reportes
-python visualize_preconvergence.py
-
-# Ver reporte HTML
-open preconvergencia_out/visualization_report/preconvergence_report.html
+### Añadir Nueva Configuración
+```python
+# src/config/settings.py
+def get_custom_config() -> PreconvergenceConfig:
+    return PreconvergenceConfig(
+        # Parámetros personalizados
+        cutoff_list=[100, 150, 200],
+        max_workers=8,
+        # ...
+    )
 ```
 
-## 🔬 Metodología DFT
+## 📈 Rendimiento
 
-### Funcional y Base
-- **Funcional**: PBE (Perdew-Burke-Ernzerhof)
-- **Base**: GTH (Goedecker-Teter-Hutter) - dzvp
-- **Pseudopotenciales**: GTH-PBE
-- **Smearing**: Fermi-Dirac σ = 0.01 Ha
+### Benchmarks Típicos
 
-### Parámetros de Convergencia
-- **SCF**: tol = 1e-6 (relajado de 1e-8 para velocidad)
-- **Cutoff**: 100 Ry (determinado por convergencia)
-- **k-mesh**: 2x2x2 (suficiente para célula unitaria)
+| Configuración | Tiempo Estimado | Memoria | CPUs |
+|---------------|----------------|---------|------|
+| `fast` | 5-15 min | 2-4 GB | 1-2 |
+| `default` | 30-60 min | 4-8 GB | 2-4 |
+| `production` | 2-6 horas | 8-16 GB | 4-8 |
+| `hpc` | 1-4 horas | 32-128 GB | 16+ |
 
-## 🚀 Escalado a HPC
+### Optimizaciones Implementadas
 
-### SLURM Scripts Disponibles
-```bash
-# Job arrays para múltiples cálculos
-sbatch slurm_array_job.sh
-
-# Pipeline incremental con checkpoints
-sbatch slurm_incremental.sh
-
-# Job multinodo
-sbatch slurm_multi_node.sh
-```
-
-### Recomendaciones HPC
-1. **Nodos grandes**: Usar k-mesh 4x4x4+ para precisión
-2. **MPI**: Implementar paralelización híbrida MPI+OpenMP
-3. **Checkpointing**: Usar recuperación automática de fallos
-4. **Monitoreo**: Scripts de diagnóstico incluidos
-
-## 📚 Dependencias
-
-### Python Packages
-```
-numpy>=1.24
-scipy>=1.13
-pandas>=1.5
-matplotlib>=3.7
-pyscf==2.3.0
-pymatgen>=2024.9.3
-spglib>=2.0.2
-```
-
-### Sistema
-- **Python**: 3.10+
-- **Compiladores**: gcc/gfortran para PySCF
-- **BLAS/LAPACK**: OpenBLAS recomendado
-- **Memoria**: 4GB+ RAM recomendado
+- **Paralelización por tareas**: Cada punto de cálculo independiente se ejecuta en paralelo
+- **Agrupamiento inteligente**: Tareas similares se ejecutan juntas para optimizar caché
+- **Control de flujo**: Limitación de concurrencia para evitar sobrecarga de memoria
+- **Early stopping**: Detención anticipada basada en criterios de convergencia
+- **Checkpoints incrementales**: Guardado periódico del progreso
 
 ## 🤝 Contribución
 
-### Estructura del Código
-- **`preconvergencia_GaAs.py`**: Pipeline principal DFT
-- **`visualize_preconvergence.py`**: Generador de reportes
-- **`optimize_pipeline.py`**: Analizador de optimización
-- **`hpc_workflow_manager.py`**: Gestión HPC
+1. Fork el proyecto
+2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
+3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
+4. Push a la rama (`git push origin feature/AmazingFeature`)
+5. Abre un Pull Request
 
-### Mejoras Futuras
-- [ ] Extensión a otros materiales (Si, perovskitas, etc.)
-- [ ] Algoritmos de machine learning para predicción de parámetros
-- [ ] Interfaz web para monitoreo en tiempo real
-- [ ] Integración con workflow managers (FireWorks, AiiDA)
+## 📝 Licencia
 
-## 📄 Licencia
-
-Este proyecto está bajo la Licencia MIT. Ver archivo `LICENSE` para detalles.
+Este proyecto está bajo la Licencia MIT. Ver el archivo `LICENSE` para más detalles.
 
 ## 🙏 Agradecimientos
 
-- **PySCF**: Framework DFT de alto rendimiento
-- **PyMatGen**: Análisis de estructuras cristalinas
-- **Docker**: Contenedorización reproducible
-- **Comunidad HPC**: Scripts y mejores prácticas
+- PySCF por el framework DFT
+- PyMatGen por herramientas de cristalografía
+- Comunidad científica de Python por las mejores prácticas
 
-## 📞 Contacto
+## 📞 Soporte
 
-Para preguntas sobre el pipeline o colaboraciones:
+Para soporte técnico o preguntas:
 
-- **Issues**: Reportar bugs y sugerencias
-- **Discussions**: Preguntas generales sobre DFT/PBC
-- **Wiki**: Documentación detallada del pipeline
+1. Revisa la documentación en `docs/`
+2. Abre un issue en GitHub
+3. Contacta al equipo de desarrollo
 
 ---
 
-**Estado del Proyecto**: ✅ Validación local completada, listo para escalado HPC.
-
-**Última Validación**: 2025-11-09 - 8x speedup confirmado, convergencia lograda.
+**Nota**: Este proyecto está diseñado siguiendo las mejores prácticas de computación científica con Python, sirviendo como base sólida para proyectos similares en física computacional y química cuántica.

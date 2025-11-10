@@ -1,42 +1,44 @@
-FROM python:3.10-slim
+# Dockerfile para el proyecto de preconvergencia GaAs refactorizado
+FROM python:3.11-slim
 
-# Evitar prompts interactivos durante instalación
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    OMP_NUM_THREADS=8 \
-    OPENBLAS_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1 \
-    PYSCF_MAX_MEMORY=8000
-
-# Instalar dependencias del sistema para PySCF y bibliotecas científicas
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gfortran cmake \
-    libopenblas-dev liblapack-dev libfftw3-dev libhdf5-dev \
-    libxc-dev \
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gfortran \
+    libblas-dev \
+    liblapack-dev \
+    libopenmpi-dev \
+    openmpi-bin \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Crear usuario no-root
+RUN useradd --create-home --shell /bin/bash preconvergence
+USER preconvergence
+WORKDIR /home/preconvergence
 
-# Copiar archivos del proyecto
-COPY requirements.txt .
-COPY preconvergencia_GaAs.py .
-COPY optimization_guide.md .
-COPY diagnostics.py .
-COPY advanced_optimization.py .
-COPY optimization_config.json .
-COPY test_docker.py .
-COPY resume_checkpoint.py .
+# Copiar archivos de configuración de Python
+COPY --chown=preconvergence:preconvergence pyproject.toml setup.py requirements.txt ./
 
 # Instalar dependencias Python
-RUN python -m pip install --upgrade pip wheel setuptools \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --upgrade numpy scipy matplotlib pandas pymatgen spglib psutil
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Crear usuario no-root para seguridad
-RUN useradd -m -s /bin/bash appuser \
-    && chown -R appuser:appuser /app
-USER appuser
+# Copiar código fuente
+COPY --chown=preconvergence:preconvergence src/ ./src/
+COPY --chown=preconvergence:preconvergence scripts/ ./scripts/
+COPY --chown=preconvergence:preconvergence config/ ./config/
 
-# Configuración para desarrollo flexible
-CMD ["python", "preconvergencia_GaAs.py", "--help"]
+# Crear directorios de salida
+RUN mkdir -p results logs
+
+# Variables de entorno para PySCF
+ENV PYSCF_MAX_MEMORY=4096
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+
+# Punto de entrada
+ENTRYPOINT ["python", "scripts/run_preconvergence.py"]
+
+# Comando por defecto
+CMD ["--config", "config/docker.yaml", "--output_dir", "results"]

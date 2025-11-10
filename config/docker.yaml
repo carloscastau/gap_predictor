@@ -1,0 +1,41 @@
+# config/docker.yaml
+# Configuración optimizada para ejecución en contenedores Docker
+
+# Parámetros físicos
+lattice_constant: 5.653
+x_ga: 0.25
+sigma_ha: 0.01
+
+# Parámetros computacionales
+basis_set: "gth-dzvp"
+pseudopotential: "gth-pbe"
+xc_functional: "PBE"
+
+# Parámetros de convergencia (optimizados para Docker)
+cutoff_list: [80, 120]  # Lista reducida para tiempos de ejecución razonables
+kmesh_list: [[2, 2, 2], [4, 4, 4]]  # Mallas más pequeñas
+
+# Configuración de paralelismo (limitada para contenedores)
+max_workers: 2  # Limitado por CPUs disponibles en contenedor
+timeout_seconds: 180  # 3 minutos por cálculo
+memory_limit_gb: 4.0  # Memoria limitada en contenedores
+
+# Configuración de salida
+output_dir: "results"
+checkpoint_interval: 30  # Checkpoints más frecuentes
+
+# Configuración de stages
+stage_timeout: 300  # 5 minutos por stage
+
+# Configuración de logging
+log_level: "INFO"
+log_file: "preconv.log"
+
+# Configuración específica para Docker
+use_gpu: false  # GPU no disponible en contenedores estándar
+gpu_memory_limit: 0
+
+# Configuración adicional para Docker
+docker_optimized: true
+fast_mode: true
+validation_mode: true  # Modo validación para pruebas rápidas
