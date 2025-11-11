@@ -1,0 +1,604 @@
+# src/utils/production_monitor.py
+"""
+Monitor en tiempo real para producción - Preconvergencia-GaAs v2.0
+Sistema completo de monitoreo con métricas, alertas y reportes
+"""
+
+import time
+import psutil
+import threading
+import json
+import asyncio
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Any, Optional, Callable
+from pathlib import Path
+from datetime import datetime, timedelta
+from contextlib import contextmanager
+import warnings
+
+@dataclass
+class ProductionMetrics:
+    """Métricas de producción en tiempo real."""
+    timestamp: float
+    cpu_percent: float
+    memory_mb: float
+    memory_percent: float
+    disk_io_read: float
+    disk_io_write: float
+    network_io_sent: float
+    network_io_recv: float
+    active_processes: int
+    stage_name: Optional[str] = None
+    stage_duration: Optional[float] = None
+    stage_status: Optional[str] = None
+    
+    # Métricas específicas de DFT
+    dft_convergence_rate: Optional[float] = None
+    avg_calculation_time: Optional[float] = None
+    memory_per_calculation: Optional[float] = None
+    
+    # Métricas de sistema
+    load_average: Optional[float] = None
+    temperature: Optional[float] = None
+
+class ProductionMonitor:
+    """Monitor en tiempo real para producción."""
+    
+    def __init__(self, config, output_dir: Path):
+        self.config = config
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Métricas y historial
+        self.metrics_history: List[ProductionMetrics] = []
+        self.current_stage: Optional[str] = None
+        self.stage_start_time: Optional[float] = None
+        self.stage_history: List[Dict[str, Any]] = []
+        
+        # Configuración de monitoreo
+        self.is_monitoring = False
+        self.monitor_thread = None
+        self.monitoring_interval = 1.0  # segundos
+        self.max_history_size = 10000  # máximo de métricas en memoria
+        
+        # Configuración de alertas
+        self.alert_thresholds = {
+            'memory_percent': 85.0,
+            'cpu_percent': 90.0,
+            'disk_usage_percent': 90.0,
+            'stage_timeout': 3600.0,  # 1 hora
+            'convergence_failure_rate': 0.2,  # 20%
+            'memory_per_calculation_threshold': 2000.0  # 2GB
+        }
+        
+        # Sistema de alertas
+        self.alerts: List[Dict[str, Any]] = []
+        self.alert_callbacks: List[Callable] = []
+        self.suppressed_alerts: Dict[str, float] = {}  # alert_type -> suppression_until
+        
+        # Métricas agregadas
+        self.aggregated_metrics = {
+            'start_time': time.time(),
+            'total_stages': 0,
+            'successful_stages': 0,
+            'failed_stages': 0,
+            'total_calculations': 0,
+            'converged_calculations': 0,
+            'total_energy_calculations': 0,
+            'total_time_seconds': 0.0
+        }
+        
+        # Inicializar monitoreo de IO inicial
+        self._initialize_io_counters()
+    
+    def _initialize_io_counters(self):
+        """Inicializa contadores de IO base."""
+        try:
+            disk = psutil.disk_io_counters()
+            network = psutil.net_io_counters()
+            
+            self._initial_disk_read = disk.read_bytes if disk else 0
+            self._initial_disk_write = disk.write_bytes if disk else 0
+            self._initial_network_sent = network.bytes_sent if network else 0
+            self._initial_network_recv = network.bytes_recv if network else 0
+            
+        except Exception:
+            # Fallbacks en caso de error
+            self._initial_disk_read = 0
+            self._initial_disk_write = 0
+            self._initial_network_sent = 0
+            self._initial_network_recv = 0
+    
+    @contextmanager
+    def stage_context(self, stage_name: str, stage_type: str = "unknown"):
+        """Context manager para tracking detallado de stages."""
+        old_stage = self.current_stage
+        old_start_time = self.stage_start_time
+        
+        self.current_stage = stage_name
+        self.stage_start_time = time.time()
+        stage_info = {
+            'name': stage_name,
+            'type': stage_type,
+            'start_time': self.stage_start_time,
+            'status': 'running'
+        }
+        
+        try:
+            yield
+            stage_info['status'] = 'completed'
+            stage_info['end_time'] = time.time()
+            stage_info['duration'] = stage_info['end_time'] - stage_info['start_time']
+            self.aggregated_metrics['successful_stages'] += 1
+            
+        except Exception as e:
+            stage_info['status'] = 'failed'
+            stage_info['end_time'] = time.time()
+            stage_info['duration'] = stage_info['end_time'] - stage_info['start_time']
+            stage_info['error'] = str(e)
+            self.aggregated_metrics['failed_stages'] += 1
+            self._generate_alert('stage_failure', {
+                'stage_name': stage_name,
+                'error': str(e),
+                'duration': stage_info['duration']
+            })
+            
+        finally:
+            self.stage_history.append(stage_info)
+            self.aggregated_metrics['total_stages'] += 1
+            self.current_stage = old_stage
+            self.stage_start_time = old_start_time
+    
+    def collect_current_metrics(self) -> ProductionMetrics:
+        """Recolecta métricas actuales del sistema."""
+        # Métricas básicas del sistema
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        
+        # Métricas de IO (diferenciales)
+        try:
+            disk = psutil.disk_io_counters()
+            network = psutil.net_io_counters()
+            
+            disk_read_delta = disk.read_bytes - self._initial_disk_read if disk else 0
+            disk_write_delta = disk.write_bytes - self._initial_disk_write if disk else 0
+            network_sent_delta = network.bytes_sent - self._initial_network_sent if network else 0
+            network_recv_delta = network.bytes_recv - self._initial_network_recv if network else 0
+            
+        except Exception:
+            disk_read_delta = disk_write_delta = network_sent_delta = network_recv_delta = 0
+        
+        # Métricas adicionales
+        try:
+            load_avg = psutil.getloadavg()[0] if hasattr(psutil, 'getloadavg') else None
+        except Exception:
+            load_avg = None
+        
+        # Calcular duración del stage actual
+        stage_duration = None
+        if self.stage_start_time:
+            stage_duration = time.time() - self.stage_start_time
+        
+        return ProductionMetrics(
+            timestamp=time.time(),
+            cpu_percent=cpu_percent,
+            memory_mb=memory.used / (1024 * 1024),
+            memory_percent=memory.percent,
+            disk_io_read=disk_read_delta,
+            disk_io_write=disk_write_delta,
+            network_io_sent=network_sent_delta,
+            network_io_recv=network_recv_delta,
+            active_processes=len(psutil.pids()),
+            stage_name=self.current_stage,
+            stage_duration=stage_duration,
+            load_average=load_avg
+        )
+    
+    def _should_suppress_alert(self, alert_type: str) -> bool:
+        """Verifica si una alerta debe ser suprimida."""
+        suppress_until = self.suppressed_alerts.get(alert_type, 0)
+        return time.time() < suppress_until
+    
+    def _suppress_alert(self, alert_type: str, duration_seconds: int = 300):
+        """Suprime alertas por un período."""
+        self.suppressed_alerts[alert_type] = time.time() + duration_seconds
+    
+    def check_alerts(self, metrics: ProductionMetrics) -> List[Dict[str, Any]]:
+        """Verifica si se deben generar alertas."""
+        if self._should_suppress_alert('system_overload'):
+            return []
+        
+        alerts_generated = []
+        
+        # Alerta de memoria alta
+        if metrics.memory_percent > self.alert_thresholds['memory_percent']:
+            alert = {
+                'timestamp': metrics.timestamp,
+                'type': 'high_memory',
+                'severity': 'warning' if metrics.memory_percent < 95 else 'critical',
+                'current_value': metrics.memory_percent,
+                'threshold': self.alert_thresholds['memory_percent'],
+                'stage': metrics.stage_name,
+                'message': f"High memory usage: {metrics.memory_percent:.1f}%"
+            }
+            alerts_generated.append(alert)
+            self._handle_alert(alert)
+        
+        # Alerta de CPU alta
+        if metrics.cpu_percent > self.alert_thresholds['cpu_percent']:
+            alert = {
+                'timestamp': metrics.timestamp,
+                'type': 'high_cpu',
+                'severity': 'warning' if metrics.cpu_percent < 95 else 'critical',
+                'current_value': metrics.cpu_percent,
+                'threshold': self.alert_thresholds['cpu_percent'],
+                'stage': metrics.stage_name,
+                'message': f"High CPU usage: {metrics.cpu_percent:.1f}%"
+            }
+            alerts_generated.append(alert)
+            self._handle_alert(alert)
+        
+        # Alerta de timeout de stage
+        if (metrics.stage_duration and 
+            metrics.stage_duration > self.alert_thresholds['stage_timeout'] and
+            self.current_stage):
+            alert = {
+                'timestamp': metrics.timestamp,
+                'type': 'stage_timeout',
+                'severity': 'critical',
+                'stage': self.current_stage,
+                'duration': metrics.stage_duration,
+                'threshold': self.alert_thresholds['stage_timeout'],
+                'message': f"Stage timeout: {self.current_stage} running for {metrics.stage_duration/3600:.1f}h"
+            }
+            alerts_generated.append(alert)
+            self._handle_alert(alert)
+            self._suppress_alert('stage_timeout', 600)  # 10 minutos
+        
+        # Alerta de falta de espacio en disco
+        try:
+            disk_usage = psutil.disk_usage('.').percent
+            if disk_usage > self.alert_thresholds['disk_usage_percent']:
+                alert = {
+                    'timestamp': metrics.timestamp,
+                    'type': 'disk_space_low',
+                    'severity': 'critical',
+                    'current_value': disk_usage,
+                    'threshold': self.alert_thresholds['disk_usage_percent'],
+                    'message': f"Low disk space: {disk_usage:.1f}%"
+                }
+                alerts_generated.append(alert)
+                self._handle_alert(alert)
+        except Exception:
+            pass
+        
+        # Alerta de sistema sobrecargado
+        system_overload = (
+            metrics.memory_percent > 80 and 
+            metrics.cpu_percent > 80 and
+            metrics.load_average and metrics.load_average > psutil.cpu_count()
+        )
+        
+        if system_overload:
+            alert = {
+                'timestamp': metrics.timestamp,
+                'type': 'system_overload',
+                'severity': 'critical',
+                'message': f"System overload detected - Memory: {metrics.memory_percent:.1f}%, CPU: {metrics.cpu_percent:.1f}%, Load: {metrics.load_average:.1f}"
+            }
+            alerts_generated.append(alert)
+            self._handle_alert(alert)
+            self._suppress_alert('system_overload', 300)  # 5 minutos
+        
+        return alerts_generated
+    
+    def _handle_alert(self, alert: Dict[str, Any]):
+        """Maneja alertas generadas."""
+        # Agregar a historial
+        self.alerts.append(alert)
+        
+        # Log alerta
+        severity_symbol = {
+            'info': 'ℹ️',
+            'warning': '⚠️',
+            'critical': '🚨'
+        }
+        
+        symbol = severity_symbol.get(alert.get('severity', 'info'), '📝')
+        timestamp_str = datetime.fromtimestamp(alert['timestamp']).strftime('%H:%M:%S')
+        print(f"{symbol} ALERT [{timestamp_str}] {alert['type']}: {alert['message']}")
+        
+        # Guardar alerta a archivo
+        alert_file = self.output_dir / f"alerts_{datetime.now().strftime('%Y%m%d')}.log"
+        with open(alert_file, 'a') as f:
+            f.write(f"{timestamp_str} - {alert['severity'].upper()} - {alert['type']} - {alert['message']}\n")
+        
+        # Ejecutar callbacks
+        for callback in self.alert_callbacks:
+            try:
+                callback(alert)
+            except Exception as e:
+                print(f"Error in alert callback: {e}")
+    
+    def start_monitoring(self, interval: float = 1.0):
+        """Inicia monitoreo en background."""
+        if self.is_monitoring:
+            print("Monitor already running")
+            return
+        
+        self.monitoring_interval = interval
+        self.is_monitoring = True
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            args=(interval,),
+            daemon=True,
+            name="ProductionMonitor"
+        )
+        self.monitor_thread.start()
+        print(f"Production monitor started (interval: {interval}s)")
+    
+    def stop_monitoring(self):
+        """Detiene monitoreo."""
+        self.is_monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5.0)
+        print("Production monitor stopped")
+    
+    def _monitor_loop(self, interval: float):
+        """Loop principal de monitoreo."""
+        last_save_time = time.time()
+        
+        while self.is_monitoring:
+            try:
+                # Recolectar métricas
+                metrics = self.collect_current_metrics()
+                self.metrics_history.append(metrics)
+                
+                # Mantener tamaño máximo del historial
+                if len(self.metrics_history) > self.max_history_size:
+                    self.metrics_history = self.metrics_history[-self.max_history_size//2:]
+                
+                # Verificar alertas
+                alerts = self.check_alerts(metrics)
+                
+                # Guardar métricas cada 60 segundos
+                current_time = time.time()
+                if current_time - last_save_time >= 60.0:
+                    self._save_metrics_batch()
+                    last_save_time = current_time
+                
+                time.sleep(interval)
+                
+            except Exception as e:
+                print(f"Error in monitoring loop: {e}")
+                time.sleep(interval)
+    
+    def _save_metrics_batch(self):
+        """Guarda lote de métricas."""
+        if not self.metrics_history:
+            return
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        metrics_file = self.output_dir / f"metrics_{timestamp}.json"
+        
+        # Obtener últimas métricas
+        recent_metrics = self.metrics_history[-300:]  # Últimos 5 minutos
+        
+        # Preparar datos
+        data = {
+            'timestamp': timestamp,
+            'config': self.config.to_dict(),
+            'aggregated_metrics': self.aggregated_metrics,
+            'metrics': [asdict(m) for m in recent_metrics],
+            'alerts': self.alerts[-20:],  # Últimas 20 alertas
+            'stage_history': self.stage_history[-10:],  # Últimos 10 stages
+            'summary': self.get_performance_summary()
+        }
+        
+        # Guardar a archivo
+        try:
+            with open(metrics_file, 'w') as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as e:
+            print(f"Error saving metrics batch: {e}")
+    
+    def add_alert_callback(self, callback: Callable):
+        """Agrega callback para alertas."""
+        self.alert_callbacks.append(callback)
+    
+    def get_current_metrics(self) -> Optional[ProductionMetrics]:
+        """Retorna métricas más recientes."""
+        return self.metrics_history[-1] if self.metrics_history else None
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """Genera resumen de performance."""
+        if not self.metrics_history:
+            return {'error': 'No metrics available'}
+        
+        recent_metrics = self.metrics_history[-300:]  # Últimos 5 minutos
+        
+        # Estadísticas básicas
+        cpu_values = [m.cpu_percent for m in recent_metrics]
+        memory_values = [m.memory_mb for m in recent_metrics]
+        memory_percent_values = [m.memory_percent for m in recent_metrics]
+        
+        # Tiempo de monitoreo
+        monitoring_duration = recent_metrics[-1].timestamp - recent_metrics[0].timestamp
+        
+        # Estadísticas de stages
+        active_stages = list(set(m.stage_name for m in recent_metrics if m.stage_name and m.stage_duration))
+        
+        # Calcular promedios ponderados
+        stage_durations = [m.stage_duration for m in recent_metrics if m.stage_duration]
+        avg_stage_duration = sum(stage_durations) / len(stage_durations) if stage_durations else 0
+        
+        return {
+            'monitoring_info': {
+                'duration_seconds': monitoring_duration,
+                'samples_collected': len(recent_metrics),
+                'monitoring_start': datetime.fromtimestamp(recent_metrics[0].timestamp).isoformat(),
+                'monitoring_end': datetime.fromtimestamp(recent_metrics[-1].timestamp).isoformat()
+            },
+            'system_stats': {
+                'cpu_average': sum(cpu_values) / len(cpu_values),
+                'cpu_max': max(cpu_values),
+                'cpu_min': min(cpu_values),
+                'memory_average_mb': sum(memory_values) / len(memory_values),
+                'memory_max_mb': max(memory_values),
+                'memory_max_percent': max(memory_percent_values)
+            },
+            'stage_stats': {
+                'stages_monitored': len(active_stages),
+                'active_stage_names': active_stages,
+                'avg_stage_duration_minutes': avg_stage_duration / 60,
+                'total_stages_run': self.aggregated_metrics['total_stages'],
+                'successful_stages': self.aggregated_metrics['successful_stages'],
+                'failed_stages': self.aggregated_metrics['failed_stages'],
+                'success_rate': (self.aggregated_metrics['successful_stages'] / 
+                               max(1, self.aggregated_metrics['total_stages']))
+            },
+            'alert_stats': {
+                'total_alerts': len(self.alerts),
+                'critical_alerts': len([a for a in self.alerts if a.get('severity') == 'critical']),
+                'warning_alerts': len([a for a in self.alerts if a.get('severity') == 'warning']),
+                'recent_alerts': len([a for a in self.alerts if time.time() - a['timestamp'] < 3600])
+            },
+            'resource_efficiency': {
+                'cpu_efficiency': (100 - sum(cpu_values) / len(cpu_values)),
+                'memory_efficiency': (100 - sum(memory_percent_values) / len(memory_percent_values)),
+                'overall_health_score': self._calculate_health_score(recent_metrics)
+            }
+        }
+    
+    def _calculate_health_score(self, metrics: List[ProductionMetrics]) -> float:
+        """Calcula score de salud general del sistema (0-100)."""
+        if not metrics:
+            return 0.0
+        
+        # Factores de salud
+        cpu_health = 100 - (sum(m.cpu_percent for m in metrics) / len(metrics))
+        memory_health = 100 - (sum(m.memory_percent for m in metrics) / len(metrics))
+        
+        # Penalizaciones por alertas críticas recientes
+        recent_critical_alerts = len([a for a in self.alerts 
+                                    if a.get('severity') == 'critical' and 
+                                    time.time() - a['timestamp'] < 3600])
+        alert_penalty = min(recent_critical_alerts * 10, 30)  # Máximo 30 puntos de penalización
+        
+        # Calcular score
+        base_health = (cpu_health + memory_health) / 2
+        final_health = max(0, base_health - alert_penalty)
+        
+        return min(100, final_health)
+    
+    def export_metrics(self, filepath: Path, format: str = 'json') -> bool:
+        """Exporta métricas a archivo."""
+        try:
+            data = {
+                'export_timestamp': datetime.now().isoformat(),
+                'config': self.config.to_dict(),
+                'aggregated_metrics': self.aggregated_metrics,
+                'all_metrics': [asdict(m) for m in self.metrics_history],
+                'all_alerts': self.alerts,
+                'stage_history': self.stage_history,
+                'summary': self.get_performance_summary()
+            }
+            
+            if format.lower() == 'json':
+                with open(filepath, 'w') as f:
+                    json.dump(data, f, indent=2, default=str)
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+            
+            print(f"Metrics exported to {filepath}")
+            return True
+            
+        except Exception as e:
+            print(f"Error exporting metrics: {e}")
+            return False
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """Retorna estado de salud actual del sistema."""
+        current_metrics = self.get_current_metrics()
+        if not current_metrics:
+            return {'status': 'no_data', 'score': 0}
+        
+        summary = self.get_performance_summary()
+        
+        # Determinar estado general
+        health_score = summary['resource_efficiency']['overall_health_score']
+        
+        if health_score >= 80:
+            status = 'healthy'
+            color = 'green'
+        elif health_score >= 60:
+            status = 'warning'
+            color = 'yellow'
+        elif health_score >= 40:
+            status = 'degraded'
+            color = 'orange'
+        else:
+            status = 'critical'
+            color = 'red'
+        
+        return {
+            'status': status,
+            'health_score': health_score,
+            'color': color,
+            'current_metrics': asdict(current_metrics),
+            'summary': summary,
+            'active_alerts': len([a for a in self.alerts if time.time() - a['timestamp'] < 3600])
+        }
+
+# Función de conveniencia para uso directo
+def create_production_monitor(config, output_dir: Path = None):
+    """Crea y configura un monitor de producción."""
+    if output_dir is None:
+        output_dir = config.output_dir / "monitoring"
+    
+    return ProductionMonitor(config, output_dir)
+
+# Si se ejecuta como script
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    
+    # Agregar src al path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    
+    try:
+        from config.settings import PreconvergenceConfig
+        
+        # Crear configuración de prueba
+        config = PreconvergenceConfig()
+        monitor = create_production_monitor(config)
+        
+        print("🖥️  Monitor de Producción - Preconvergencia-GaAs v2.0")
+        print("=" * 60)
+        
+        # Iniciar monitoreo por 30 segundos
+        print("Iniciando monitoreo de prueba por 30 segundos...")
+        monitor.start_monitoring(interval=1.0)
+        
+        time.sleep(30)
+        
+        # Detener y mostrar resumen
+        monitor.stop_monitoring()
+        summary = monitor.get_performance_summary()
+        
+        print("\n📊 Resumen de Monitoreo:")
+        print(f"  Duración: {summary['monitoring_info']['duration_seconds']:.1f} segundos")
+        print(f"  Muestras: {summary['monitoring_info']['samples_collected']}")
+        print(f"  CPU Promedio: {summary['system_stats']['cpu_average']:.1f}%")
+        print(f"  Memoria Promedio: {summary['system_stats']['memory_average_mb']:.1f} MB")
+        print(f"  Salud General: {summary['resource_efficiency']['overall_health_score']:.1f}%")
+        print(f"  Alertas: {summary['alert_stats']['total_alerts']}")
+        
+        # Exportar métricas
+        export_file = Path("monitoring_test_export.json")
+        monitor.export_metrics(export_file)
+        print(f"  Métricas exportadas a: {export_file}")
+        
+    except Exception as e:
+        print(f"Error en monitor de prueba: {e}")
+        sys.exit(1)

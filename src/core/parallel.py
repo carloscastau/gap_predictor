@@ -48,8 +48,9 @@ class MemoryMonitor:
         self.peak_usage = 0
         self.current_usage = 0
 
-    def track_usage(self, func):
-        """Decorador para tracking de memoria."""
+    @staticmethod
+    def track_usage(func):
+        """Decorador estático para tracking de memoria."""
         def wrapper(*args, **kwargs):
             # Aquí iría el código de monitoreo de memoria
             # Por simplicidad, solo medimos tiempo
@@ -57,10 +58,8 @@ class MemoryMonitor:
             result = func(*args, **kwargs)
             end_time = time.perf_counter()
 
-            # Simular monitoreo de memoria
-            self.current_usage = 500 + (end_time - start_time) * 100  # MB
-            self.peak_usage = max(self.peak_usage, self.current_usage)
-
+            # Simular monitoreo de memoria (sin acceso a self)
+            # Este es un decorador simplificado
             return result
         return wrapper
 

@@ -143,8 +143,10 @@ class LatticeOptimizer:
             try:
                 energy = await energy_calculator(a)
                 exploration_results.append((a, energy))
-                print(".4f"            except Exception as e:
-                print(".4f"                exploration_results.append((a, np.nan))
+                print(f"  a = {a:.4f}, E = {energy:.6f} Ha")
+            except Exception as e:
+                exploration_results.append((a, np.nan))
+                print(f"  a = {a:.4f}, Error: {e}")
 
         # Filtrar puntos válidos
         valid_results = [(a, e) for a, e in exploration_results if np.isfinite(e)]
@@ -162,13 +164,13 @@ class LatticeOptimizer:
             a_opt_initial = -coeffs[1] / (2 * coeffs[0])
             e_min_initial = np.polyval(coeffs, a_opt_initial)
 
-            print(".6f"
+            print(f"  Estimación inicial: a₀ = {a_opt_initial:.6f} Å, E = {e_min_initial:.6f} Ha")
         except:
             # Fallback: mínimo de puntos disponibles
             min_idx = np.argmin(e_array)
             a_opt_initial = a_array[min_idx]
             e_min_initial = e_array[min_idx]
-            print(".6f"
+            print(f"  Fallback: a₀ = {a_opt_initial:.6f} Å, E = {e_min_initial:.6f} Ha")
         # Fase 3: Refinamiento local
         print("🔧 Fase 3: Refinamiento local")
         refinement_range = 0.05  # ±0.05 Å
@@ -187,8 +189,10 @@ class LatticeOptimizer:
                 try:
                     energy = await energy_calculator(a)
                     refinement_results.append((a, energy))
-                    print(".4f"                except Exception as e:
-                    print(".4f"                    refinement_results.append((a, np.nan))
+                    print(f"    a = {a:.4f}, E = {energy:.6f} Ha")
+                except Exception as e:
+                    refinement_results.append((a, np.nan))
+                    print(f"    a = {a:.4f}, Error: {e}")
 
         # Combinar todos los resultados
         all_results = valid_results + [(a, e) for a, e in refinement_results
@@ -234,7 +238,11 @@ class LatticeOptimizer:
                 'success': True
             }
 
-            print("✅ Optimización completada:"            print(".6f"            print(".6f"            print(".4f"            print(".1f"
+            print("✅ Optimización completada:")
+            print(f"  a_opt = {a_opt:.6f} Å")
+            print(f"  E_min = {e_min:.6f} Ha")
+            print(f"  R² = {r2:.4f}")
+            print(f"  Tiempo total: {computation_time:.1f} s")
             return result
 
         except Exception as e:

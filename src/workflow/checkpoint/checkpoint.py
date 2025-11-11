@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 import gzip
 
-from ..utils.logging import StructuredLogger
+from ...utils.logging import StructuredLogger
 
 
 @dataclass

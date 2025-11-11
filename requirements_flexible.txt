@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+requirements_flexible.txt
+Dependencias flexibles para el proyecto sin versiones específicas que requieren compilación
+"""
+
+numpy>=1.24
+scipy>=1.13
+pandas>=1.5
+matplotlib>=3.7
+pymatgen>=2024.9.3
+spglib>=2.0.2
+h5py>=3.0
+
+# Dev dependencies
+pytest>=7.0
+pytest-asyncio>=0.21
+pytest-cov>=4.0

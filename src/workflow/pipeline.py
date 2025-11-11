@@ -15,6 +15,7 @@ try:
     from ..core.parallel import TaskScheduler, CalculationTask
     from ..workflow.checkpoint import CheckpointManager
     from ..utils.logging import StructuredLogger
+    from ..utils.production_monitor import create_production_monitor
 except ImportError:
     # Fallback para imports absolutos cuando se ejecuta como script
     from config.settings import PreconvergenceConfig
@@ -23,6 +24,7 @@ except ImportError:
     from core.parallel import TaskScheduler, CalculationTask
     from workflow.checkpoint import CheckpointManager
     from utils.logging import StructuredLogger
+    from utils.production_monitor import create_production_monitor
 
 
 @dataclass
@@ -277,7 +279,7 @@ class LatticeOptimizationStage(PipelineStage):
             calculator = DFTCalculator(self.config)
             cell_params = CellParameters(
                 lattice_constant=a,
-                x_ga=self.config.x_g,
+                x_ga=self.config.x_ga,
                 cutoff=optimal_cutoff,
                 kmesh=optimal_kmesh,
                 basis=self.config.basis_set,
@@ -303,11 +305,22 @@ class LatticeOptimizationStage(PipelineStage):
 class PreconvergencePipeline:
     """Pipeline principal con stages modulares e independientes."""
 
-    def __init__(self, config: PreconvergenceConfig):
+    def __init__(self, config: PreconvergenceConfig, enable_monitoring: bool = True):
         self.config = config
         self.stages = self._build_stages()
         self.checkpoint_manager = CheckpointManager(config.output_dir / "checkpoints")
         self.logger = StructuredLogger("Pipeline")
+        
+        # Inicializar monitor de producción si está habilitado
+        self.monitor = None
+        if enable_monitoring:
+            try:
+                self.monitor = create_production_monitor(config)
+                self.logger.info("Production monitor initialized")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize production monitor: {e}")
+        
+        self.monitoring_enabled = enable_monitoring and self.monitor is not None
 
     def _build_stages(self) -> Dict[str, PipelineStage]:
         """Construye los stages del pipeline."""
@@ -318,8 +331,13 @@ class PreconvergencePipeline:
         }
 
     async def execute(self, resume_from: Optional[str] = None) -> PipelineResult:
-        """Ejecuta el pipeline completo con manejo de checkpoints."""
+        """Ejecuta el pipeline completo con manejo de checkpoints y monitoreo."""
         start_time = time.perf_counter()
+
+        # Iniciar monitoreo si está habilitado
+        if self.monitoring_enabled and self.monitor:
+            self.monitor.start_monitoring(interval=1.0)
+            self.logger.info("Production monitoring started")
 
         # Cargar estado si se reanuda
         if resume_from:
@@ -339,37 +357,59 @@ class PreconvergencePipeline:
 
                 self.logger.info(f"Executing stage: {stage_name}")
 
-                # Ejecutar stage con timeout y manejo de errores
-                try:
-                    stage_result = await asyncio.wait_for(
-                        stage.execute(results),
-                        timeout=self.config.stage_timeout
+                # Ejecutar stage con monitoreo si está habilitado
+                if self.monitoring_enabled and self.monitor:
+                    # Usar contexto de monitoreo para el stage
+                    stage_context_manager = self.monitor.stage_context(
+                        stage_name,
+                        stage_type=self._get_stage_type(stage_name)
                     )
+                    
+                    async with stage_context_manager:
+                        try:
+                            stage_result = await asyncio.wait_for(
+                                stage.execute(results),
+                                timeout=self.config.stage_timeout
+                            )
+                        except Exception as e:
+                            # El context manager manejará el logging del error
+                            raise
+                else:
+                    # Ejecución sin monitoreo
+                    try:
+                        stage_result = await asyncio.wait_for(
+                            stage.execute(results),
+                            timeout=self.config.stage_timeout
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Error in stage {stage_name}: {e}")
+                        raise
 
-                    results[stage_name] = stage_result
+                results[stage_name] = stage_result
 
-                    # Guardar checkpoint
-                    self.checkpoint_manager.save_stage_result(stage_name, stage_result)
+                # Guardar checkpoint
+                self.checkpoint_manager.save_stage_result(stage_name, stage_result)
 
-                    # Actualizar progreso
-                    completed_stages.append(stage_name)
-                    self.checkpoint_manager.save_progress(completed_stages)
+                # Actualizar progreso
+                completed_stages.append(stage_name)
+                self.checkpoint_manager.save_progress(completed_stages)
 
-                    # Verificar si el stage falló
-                    if not stage_result.success:
-                        raise RuntimeError(f"Stage {stage_name} failed: {stage_result.data}")
-
-                except asyncio.TimeoutError:
-                    self.logger.error(f"Stage {stage_name} exceeded timeout")
-                    raise
-                except Exception as e:
-                    self.logger.error(f"Error in stage {stage_name}: {e}")
-                    # Intentar recuperación automática
-                    if await self._attempt_recovery(stage_name, e):
-                        continue
-                    raise
+                # Verificar si el stage falló
+                if not stage_result.success:
+                    raise RuntimeError(f"Stage {stage_name} failed: {stage_result.data}")
 
             total_duration = time.perf_counter() - start_time
+
+            # Detener monitoreo y exportar métricas
+            if self.monitoring_enabled and self.monitor:
+                self.monitor.stop_monitoring()
+                
+                # Exportar métricas del pipeline
+                metrics_file = self.config.output_dir / "monitoring" / f"pipeline_metrics_{int(time.time())}.json"
+                self.monitor.export_metrics(metrics_file)
+                
+                self.logger.info(f"Pipeline completed successfully in {total_duration:.2f}s")
+                self.logger.info(f"Monitoring data exported to: {metrics_file}")
 
             return PipelineResult(
                 results=results,
@@ -382,6 +422,16 @@ class PreconvergencePipeline:
             total_duration = time.perf_counter() - start_time
             self.logger.error(f"Pipeline execution failed: {e}")
 
+            # Detener monitoreo en caso de error
+            if self.monitoring_enabled and self.monitor:
+                self.monitor.stop_monitoring()
+                
+                # Exportar métricas de error
+                error_metrics_file = self.config.output_dir / "monitoring" / f"pipeline_error_{int(time.time())}.json"
+                self.monitor.export_metrics(error_metrics_file)
+                
+                self.logger.info(f"Error metrics exported to: {error_metrics_file}")
+
             return PipelineResult(
                 results=results,
                 config=self.config,
@@ -389,6 +439,17 @@ class PreconvergencePipeline:
                 success=False,
                 error_message=str(e)
             )
+
+    def _get_stage_type(self, stage_name: str) -> str:
+        """Determina el tipo de stage para el monitoreo."""
+        stage_types = {
+            'cutoff': 'convergence_analysis',
+            'kmesh': 'convergence_analysis',
+            'lattice': 'optimization',
+            'bands': 'electronic_structure',
+            'slab': 'surface_analysis'
+        }
+        return stage_types.get(stage_name, 'unknown')
 
     async def _attempt_recovery(self, stage_name: str, error: Exception) -> bool:
         """Intenta recuperación automática de errores."""
@@ -421,6 +482,157 @@ class PreconvergencePipeline:
                 'progress_percentage': 0,
                 'remaining_stages': list(self.stages.keys())
             }
+    def get_pipeline_progress(self) -> Dict[str, Any]:
+        """Obtiene progreso general del pipeline con información de monitoreo."""
+        try:
+            progress = self.checkpoint_manager.load_progress()
+            completed_stages = progress.get('completed_stages', [])
+            total_stages = len(self.stages)
+
+            base_progress = {
+                'completed_stages': completed_stages,
+                'total_stages': total_stages,
+                'progress_percentage': len(completed_stages) / total_stages * 100,
+                'remaining_stages': [s for s in self.stages.keys() if s not in completed_stages]
+            }
+            
+            # Agregar información de monitoreo si está disponible
+            if self.monitoring_enabled and self.monitor:
+                health_status = self.monitor.get_health_status()
+                base_progress['monitoring'] = {
+                    'enabled': True,
+                    'health_status': health_status,
+                    'current_metrics': health_status.get('current_metrics', {}),
+                    'summary': health_status.get('summary', {})
+                }
+            else:
+                base_progress['monitoring'] = {'enabled': False}
+            
+            return base_progress
+        except Exception as e:
+            return {
+                'completed_stages': [],
+                'total_stages': len(self.stages),
+                'progress_percentage': 0,
+                'remaining_stages': list(self.stages.keys()),
+                'monitoring': {'enabled': self.monitoring_enabled},
+                'error': str(e)
+            }
+
+    def get_monitoring_status(self) -> Optional[Dict[str, Any]]:
+        """Obtiene estado detallado del monitoreo."""
+        if not self.monitoring_enabled or not self.monitor:
+            return None
+        
+        try:
+            current_metrics = self.monitor.get_current_metrics()
+            performance_summary = self.monitor.get_performance_summary()
+            health_status = self.monitor.get_health_status()
+            
+            return {
+                'monitoring_active': self.monitor.is_monitoring,
+                'current_metrics': vars(current_metrics) if current_metrics else None,
+                'performance_summary': performance_summary,
+                'health_status': health_status,
+                'recent_alerts': self.monitor.alerts[-5:] if self.monitor.alerts else [],
+                'stage_history': self.monitor.stage_history[-5:] if self.monitor.stage_history else []
+            }
+        except Exception as e:
+            return {
+                'error': f"Failed to get monitoring status: {e}",
+                'monitoring_active': self.monitor.is_monitoring if self.monitor else False
+            }
+
+    def export_monitoring_data(self, filepath: Path = None) -> bool:
+        """Exporta datos de monitoreo a archivo."""
+        if not self.monitoring_enabled or not self.monitor:
+            return False
+        
+        if filepath is None:
+            timestamp = int(time.time())
+            filepath = self.config.output_dir / "monitoring" / f"export_{timestamp}.json"
+        
+        return self.monitor.export_metrics(filepath)
+    
+    def stop_monitoring(self):
+        """Detiene el monitoreo manualmente."""
+        if self.monitor and self.monitor.is_monitoring:
+            self.monitor.stop_monitoring()
+            self.logger.info("Monitoring stopped manually")
+    
+    def get_system_requirements_check(self) -> Dict[str, Any]:
+        """Verifica requisitos del sistema para el pipeline."""
+        import psutil
+        
+        # Verificar memoria disponible
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        total_memory_gb = psutil.virtual_memory().total / (1024**3)
+        
+        # Calcular memoria requerida (estimación conservadora)
+        max_kmesh = max(self.config.kmesh_list)
+        nkpts = max_kmesh[0] * max_kmesh[1] * max_kmesh[2]
+        estimated_memory_gb = 200 + nkpts * 50 / 1024  # MB a GB con factor de seguridad
+        
+        # Verificar CPU
+        cpu_count = psutil.cpu_count()
+        available_cores = max(1, cpu_count // 2)  # Usar la mitad como regla general
+        
+        # Verificar espacio en disco
+        disk_usage = psutil.disk_usage('.').free / (1024**3)  # GB libres
+        
+        requirements_met = {
+            'memory': {
+                'available_gb': available_memory_gb,
+                'total_gb': total_memory_gb,
+                'required_gb': estimated_memory_gb,
+                'meets_requirement': available_memory_gb >= estimated_memory_gb,
+                'utilization_percent': (total_memory_gb - available_memory_gb) / total_memory_gb * 100
+            },
+            'cpu': {
+                'total_cores': cpu_count,
+                'recommended_cores': min(self.config.max_workers, available_cores),
+                'meets_requirement': available_cores >= min(self.config.max_workers, 2)
+            },
+            'storage': {
+                'free_gb': disk_usage,
+                'required_gb': 10.0,  # Requisito mínimo conservador
+                'meets_requirement': disk_usage >= 10.0
+            }
+        }
+        
+        overall_status = (
+            requirements_met['memory']['meets_requirement'] and
+            requirements_met['cpu']['meets_requirement'] and
+            requirements_met['storage']['meets_requirement']
+        )
+        
+        return {
+            'overall_status': 'ready' if overall_status else 'inadequate',
+            'requirements': requirements_met,
+            'recommendations': self._generate_system_recommendations(requirements_met)
+        }
+    
+    def _generate_system_recommendations(self, requirements: Dict[str, Any]) -> List[str]:
+        """Genera recomendaciones basadas en los requisitos del sistema."""
+        recommendations = []
+        
+        # Recomendaciones de memoria
+        if not requirements['memory']['meets_requirement']:
+            shortfall = requirements['memory']['required_gb'] - requirements['memory']['available_gb']
+            recommendations.append(f"Consider reducing max_workers or using a system with {shortfall:.1f}GB more RAM")
+        
+        if requirements['memory']['utilization_percent'] > 80:
+            recommendations.append("High memory usage detected - close other applications")
+        
+        # Recomendaciones de CPU
+        if not requirements['cpu']['meets_requirement']:
+            recommendations.append(f"Consider increasing max_workers from {self.config.max_workers} to {requirements['cpu']['recommended_cores']}")
+        
+        # Recomendaciones de almacenamiento
+        if not requirements['storage']['meets_requirement']:
+            recommendations.append("Insufficient disk space - free up at least 10GB for safe operation")
+        
+        return recommendations
 
 
 # Funciones de utilidad para integración
