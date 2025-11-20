@@ -8,23 +8,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import json
 
+from ..config.settings import PreconvergenceConfig
+from ..core.calculator import DFTCalculator, CellParameters
+from ..core.optimizer import LatticeOptimizer, ConvergenceAnalyzer
+from ..core.parallel import TaskScheduler, CalculationTask
+from ..workflow.checkpoint import CheckpointManager
+from ..utils.logging import StructuredLogger
+# from ..utils.production_monitor import create_production_monitor  # Archivo problemático eliminado
+
+# Importaciones para integración multimaterial
 try:
-    from ..config.settings import PreconvergenceConfig
-    from ..core.calculator import DFTCalculator, CellParameters
-    from ..core.optimizer import LatticeOptimizer, ConvergenceAnalyzer
-    from ..core.parallel import TaskScheduler, CalculationTask
-    from ..workflow.checkpoint import CheckpointManager
-    from ..utils.logging import StructuredLogger
-    from ..utils.production_monitor import create_production_monitor
+    from .multi_material_pipeline import (
+        MultiMaterialPipeline, 
+        CampaignResult,
+        MaterialExecutionResult,
+        run_preconvergence_campaign
+    )
+    MULTIMATERIAL_AVAILABLE = True
 except ImportError:
-    # Fallback para imports absolutos cuando se ejecuta como script
-    from config.settings import PreconvergenceConfig
-    from core.calculator import DFTCalculator, CellParameters
-    from core.optimizer import LatticeOptimizer, ConvergenceAnalyzer
-    from core.parallel import TaskScheduler, CalculationTask
-    from workflow.checkpoint import CheckpointManager
-    from utils.logging import StructuredLogger
-    from utils.production_monitor import create_production_monitor
+    MULTIMATERIAL_AVAILABLE = False
 
 
 @dataclass
@@ -314,11 +316,10 @@ class PreconvergencePipeline:
         # Inicializar monitor de producción si está habilitado
         self.monitor = None
         if enable_monitoring:
-            try:
-                self.monitor = create_production_monitor(config)
-                self.logger.info("Production monitor initialized")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize production monitor: {e}")
+            # TODO: Implementar production_monitor cuando esté disponible
+            # self.monitor = create_production_monitor(config)
+            # self.logger.info("Production monitor initialized")
+            self.logger.warning("Production monitor not available in this version")
         
         self.monitoring_enabled = enable_monitoring and self.monitor is not None
 
@@ -462,26 +463,6 @@ class PreconvergencePipeline:
         """Obtiene estado de un stage específico."""
         return self.checkpoint_manager.load_stage_result(stage_name)
 
-    def get_pipeline_progress(self) -> Dict[str, Any]:
-        """Obtiene progreso general del pipeline."""
-        try:
-            progress = self.checkpoint_manager.load_progress()
-            completed_stages = progress.get('completed_stages', [])
-            total_stages = len(self.stages)
-
-            return {
-                'completed_stages': completed_stages,
-                'total_stages': total_stages,
-                'progress_percentage': len(completed_stages) / total_stages * 100,
-                'remaining_stages': [s for s in self.stages.keys() if s not in completed_stages]
-            }
-        except:
-            return {
-                'completed_stages': [],
-                'total_stages': len(self.stages),
-                'progress_percentage': 0,
-                'remaining_stages': list(self.stages.keys())
-            }
     def get_pipeline_progress(self) -> Dict[str, Any]:
         """Obtiene progreso general del pipeline con información de monitoreo."""
         try:
@@ -649,3 +630,181 @@ def create_pipeline_from_config(config_path: Path) -> PreconvergencePipeline:
 
     config = PreconvergenceConfig.load_from_file(config_path)
     return PreconvergencePipeline(config)
+
+
+# === FUNCIONES DE INTEGRACIÓN MULTIMATERIAL ===
+
+def run_single_material_pipeline(config: PreconvergenceConfig,
+                                material_name: str = "Material") -> PipelineResult:
+    """
+    Ejecuta pipeline para un solo material (compatibilidad con multimaterial).
+    
+    Args:
+        config: Configuración del pipeline
+        material_name: Nombre del material para logging
+        
+    Returns:
+        PipelineResult con el resultado
+    """
+    pipeline = PreconvergencePipeline(config)
+    return asyncio.run(pipeline.execute())
+
+
+def create_multi_material_pipeline_from_config(config_path: Path) -> Optional[MultiMaterialPipeline]:
+    """
+    Crea pipeline multimaterial desde archivo de configuración.
+    
+    Args:
+        config_path: Ruta al archivo de configuración YAML
+        
+    Returns:
+        MultiMaterialPipeline configurado o None si no está disponible
+    """
+    if not MULTIMATERIAL_AVAILABLE:
+        return None
+    
+    try:
+        from ..core.multi_material_config import MultiMaterialConfig
+        multi_config = MultiMaterialConfig.load_from_file(config_path)
+        return MultiMaterialPipeline(multi_config)
+    except Exception as e:
+        print(f"Error creando pipeline multimaterial: {e}")
+        return None
+
+
+# Funciones de conveniencia para migración
+def migrate_to_multi_material(single_config: PreconvergenceConfig,
+                            materials: List[str]) -> Optional[MultiMaterialPipeline]:
+    """
+    Migra configuración de material único a multimaterial.
+    
+    Args:
+        single_config: Configuración de material único
+        materials: Lista de materiales a procesar
+        
+    Returns:
+        MultiMaterialPipeline configurado o None si no está disponible
+    """
+    if not MULTIMATERIAL_AVAILABLE:
+        return None
+    
+    try:
+        from ..core.multi_material_config import MultiMaterialConfig
+        
+        # Crear configuración multimaterial basada en la individual
+        multi_config = MultiMaterialConfig(
+            base_config=single_config,
+            output_base_dir=Path("results_migrated")
+        )
+        
+        # Agregar materiales
+        for material in materials:
+            multi_config.add_material(material)
+        
+        return MultiMaterialPipeline(multi_config)
+        
+    except Exception as e:
+        print(f"Error migrando a configuración multimaterial: {e}")
+        return None
+
+
+def is_multi_material_available() -> bool:
+    """Verifica si el sistema multimaterial está disponible."""
+    return MULTIMATERIAL_AVAILABLE
+
+
+# Función de compatibilidad para ejecutar campañas
+async def run_campaign_compatibility(materials: List[str],
+                                   config: Optional[PreconvergenceConfig] = None,
+                                   parallel: bool = True,
+                                   max_workers: int = 4) -> Optional[CampaignResult]:
+    """
+    Función de compatibilidad para ejecutar campañas multimaterial.
+    
+    Args:
+        materials: Lista de materiales a procesar
+        config: Configuración base (usa default si None)
+        parallel: Ejecutar en paralelo
+        max_workers: Número máximo de workers
+        
+    Returns:
+        CampaignResult o None si no está disponible
+    """
+    if not MULTIMATERIAL_AVAILABLE:
+        print("Sistema multimaterial no disponible. Use run_single_material_pipeline para materiales individuales.")
+        return None
+    
+    try:
+        return await run_preconvergence_campaign(
+            materials=materials,
+            parallel=parallel,
+            max_workers=max_workers
+        )
+    except Exception as e:
+        print(f"Error ejecutando campaña: {e}")
+        return None
+
+
+# Función para mostrar capacidades multimaterial
+def show_multi_material_capabilities():
+    """Muestra las capacidades del sistema multimaterial."""
+    print("=== CAPACIDADES MULTIMATERIAL ===")
+    print(f"Sistema disponible: {MULTIMATERIAL_AVAILABLE}")
+    
+    if MULTIMATERIAL_AVAILABLE:
+        print("✅ Funcionalidades disponibles:")
+        print("  • Ejecución de múltiples materiales")
+        print("  • Paralelización automática")
+        print("  • Análisis comparativo")
+        print("  • Gestión de memoria inteligente")
+        print("  • Checkpoints por material")
+        print("  • Reportes de progreso")
+        print("  • Análisis estadístico avanzado")
+        print("  • Visualizaciones automáticas")
+    else:
+        print("❌ Funcionalidades multimaterial no disponibles")
+        print("  • Solo ejecución de material único")
+        print("  • Pipeline básico de preconvergencia")
+
+
+# Función para validar configuración antes de ejecutar
+def validate_multi_material_setup() -> Dict[str, Any]:
+    """
+    Valida el setup del sistema multimaterial.
+    
+    Returns:
+        Dict con información de validación
+    """
+    validation = {
+        'multi_material_available': MULTIMATERIAL_AVAILABLE,
+        'dependencies_ok': True,
+        'warnings': [],
+        'errors': []
+    }
+    
+    # Verificar dependencias
+    try:
+        import asyncio
+        import concurrent.futures
+        import numpy as np
+        import pandas as pd
+    except ImportError as e:
+        validation['dependencies_ok'] = False
+        validation['errors'].append(f"Dependencia faltante: {e}")
+    
+    # Verificar configuración de memoria
+    try:
+        import psutil
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        if memory_gb < 4:
+            validation['warnings'].append(f"Poca memoria disponible: {memory_gb:.1f}GB")
+    except ImportError:
+        validation['warnings'].append("psutil no disponible - no se puede verificar memoria")
+    
+    # Verificar espacio en disco
+    import shutil
+    free_space_gb = shutil.disk_usage('.').free / (1024**3)
+    if free_space_gb < 10:
+        validation['warnings'].append(f"Poco espacio en disco: {free_space_gb:.1f}GB libres")
+    
+    return validation
